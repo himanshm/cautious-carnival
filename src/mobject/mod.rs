@@ -1,7 +1,6 @@
 use glam::Vec2;
-use tiny_skia::{Color, PathBuilder, Transform};
+use tiny_skia::{Color, Pixmap, Transform};
 
-/// The core trait for all renderable mathematical objects.
 pub trait Mobject: Send + Sync {
     fn id(&self) -> &str;
     fn set_id(&mut self, id: String);
@@ -9,22 +8,23 @@ pub trait Mobject: Send + Sync {
     fn set_position(&mut self, pos: Vec2);
     fn color(&self) -> Color;
     fn set_color(&mut self, color: Color);
+    fn opacity(&self) -> f32;
+    fn set_opacity(&mut self, opacity: f32);
 
-    /// Converts the Mobject into a vector path for the renderer.
-    fn build_path(&self, transform: Transform) -> Option<tiny_skia::Path>;
+    /// Renders the mobject onto the given pixmap using the provided coordinate transform.
+    fn render_onto(&self, pixmap: &mut Pixmap, transform: Transform);
 
-    /// Required to clone trait objects for frame-by-frame animation interpolation.
     fn clone_box(&self) -> Box<dyn Mobject>;
 }
 
-// Implement Clone for Box<dyn Mobject>
 impl Clone for Box<dyn Mobject> {
     fn clone(&self) -> Self {
         self.clone_box()
     }
 }
 
-// --- Concrete Implementations ---
+// --- Circle and Square now implement render_onto ---
+// (Move the fill_path logic from renderer/mod.rs into here)
 
 #[derive(Clone)]
 pub struct Circle {
@@ -32,6 +32,7 @@ pub struct Circle {
     center: Vec2,
     radius: f32,
     color: Color,
+    opacity: f32,
 }
 
 impl Circle {
@@ -40,7 +41,8 @@ impl Circle {
             id: String::new(),
             center: Vec2::ZERO,
             radius,
-            color: Color::from_rgba8(52, 152, 219, 255), // Default Blue
+            color: Color::from_rgba8(52, 152, 219, 255),
+            opacity: 1.0,
         }
     }
     pub fn with_color(mut self, color: Color) -> Self {
@@ -68,13 +70,19 @@ impl Mobject for Circle {
     fn set_color(&mut self, color: Color) {
         self.color = color;
     }
+    fn opacity(&self) -> f32 {
+        self.opacity
+    }
+    fn set_opacity(&mut self, opacity: f32) {
+        self.opacity = opacity;
+    }
     fn clone_box(&self) -> Box<dyn Mobject> {
         Box::new(self.clone())
     }
 
-    fn build_path(&self, transform: Transform) -> Option<tiny_skia::Path> {
+    fn render_onto(&self, pixmap: &mut Pixmap, transform: Transform) {
+        use tiny_skia::{FillRule, Paint, PathBuilder};
         let mut pb = PathBuilder::new();
-        // Approximate circle using 4 cubic bezier curves (standard KAPPA constant)
         let k = 0.5522847498 * self.radius;
         let r = self.radius;
         let cx = self.center.x;
@@ -87,8 +95,19 @@ impl Mobject for Circle {
         pb.cubic_to(cx - r, cy - k, cx - k, cy - r, cx, cy - r);
         pb.close();
 
-        pb.finish()
-            .map(|p| p.clone().transform(transform).unwrap_or(p))
+        if let Some(path) = pb.finish() {
+            let mut paint = Paint::default();
+            paint.anti_alias = true;
+            let c = self.color;
+            let final_alpha = (c.alpha() * self.opacity * 255.0) as u8;
+            paint.set_color_rgba8(
+                (c.red() * 255.0) as u8,
+                (c.green() * 255.0) as u8,
+                (c.blue() * 255.0) as u8,
+                final_alpha,
+            );
+            pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
+        }
     }
 }
 
@@ -98,6 +117,7 @@ pub struct Square {
     center: Vec2,
     side_length: f32,
     color: Color,
+    opacity: f32,
 }
 
 impl Square {
@@ -106,7 +126,8 @@ impl Square {
             id: String::new(),
             center: Vec2::ZERO,
             side_length,
-            color: Color::from_rgba8(231, 76, 60, 255), // Default Red
+            color: Color::from_rgba8(231, 76, 60, 255),
+            opacity: 1.0,
         }
     }
 }
@@ -130,11 +151,18 @@ impl Mobject for Square {
     fn set_color(&mut self, color: Color) {
         self.color = color;
     }
+    fn opacity(&self) -> f32 {
+        self.opacity
+    }
+    fn set_opacity(&mut self, opacity: f32) {
+        self.opacity = opacity;
+    }
     fn clone_box(&self) -> Box<dyn Mobject> {
         Box::new(self.clone())
     }
 
-    fn build_path(&self, transform: Transform) -> Option<tiny_skia::Path> {
+    fn render_onto(&self, pixmap: &mut Pixmap, transform: Transform) {
+        use tiny_skia::{FillRule, Paint, PathBuilder};
         let mut pb = PathBuilder::new();
         let half = self.side_length / 2.0;
         let cx = self.center.x;
@@ -146,7 +174,18 @@ impl Mobject for Square {
         pb.line_to(cx - half, cy + half);
         pb.close();
 
-        pb.finish()
-            .map(|p| p.clone().transform(transform).unwrap_or(p))
+        if let Some(path) = pb.finish() {
+            let mut paint = Paint::default();
+            paint.anti_alias = true;
+            let c = self.color;
+            let final_alpha = (c.alpha() * self.opacity * 255.0) as u8;
+            paint.set_color_rgba8(
+                (c.red() * 255.0) as u8,
+                (c.green() * 255.0) as u8,
+                (c.blue() * 255.0) as u8,
+                final_alpha,
+            );
+            pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
+        }
     }
 }

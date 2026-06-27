@@ -20,6 +20,7 @@ categories = ["graphics", "rendering"]
 
 [dependencies]
 anyhow = "1.0.103"
+cosmic-text = "0.17.0"
 ffmpeg-sidecar = "2.5.2"
 glam = "0.33.1"
 image = "0.25.9"

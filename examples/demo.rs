@@ -1,22 +1,29 @@
-use cautious_carnival::{Circle, Scene, Square};
+use cautious_carnival::{Animation, Circle, Scene, Text};
+use glam::Vec2;
 use tiny_skia::Color;
 
 fn main() -> anyhow::Result<()> {
-    // 1. Initialize Scene (1920x1080 at 60 FPS)
     let mut scene = Scene::new(1920, 1080, 60);
 
-    // 2. Create Mobjects
-    let circle = Circle::new(1.5).with_color(Color::from_rgba8(52, 152, 219, 255)); // Blue
+    let circle = scene.add(Box::new(
+        Circle::new(1.5).with_color(Color::from_rgba8(52, 152, 219, 255)),
+    ));
+    let title = scene.add(Box::new(
+        Text::new("Cautious Carnival", 0.8).with_color(Color::WHITE),
+    ));
+    let subtitle = scene.add(Box::new(
+        Text::new("A Manim replacement in Rust", 0.35)
+            .with_color(Color::from_rgba8(189, 195, 199, 255)),
+    ));
 
-    let square = Square::new(2.0); // Default Red
+    // Position text above the circle
+    scene.play(Animation::move_to(title, Vec2::new(0.0, 3.0), 0.0));
+    scene.play(Animation::move_to(subtitle, Vec2::new(0.0, 2.2), 0.0));
+    scene.play(Animation::fade_in(title, 1.0));
+    scene.play(Animation::fade_in(subtitle, 1.0));
+    scene.play(Animation::move_to(circle, Vec2::new(4.0, -1.0), 3.0));
+    scene.play(Animation::fade_out(title, 1.0));
 
-    // 3. Add to Scene
-    scene.add(Box::new(circle));
-    scene.add(Box::new(square));
-
-    // 4. Render to MP4
-    // Note: Requires FFmpeg to be installed on your system PATH.
     scene.render_to_file("carnival_demo.mp4")?;
-
     Ok(())
 }

@@ -1,3 +1,4 @@
+use crate::animation::{Animation, MobjectId};
 use crate::encoder::VideoEncoder;
 use crate::math::easing;
 use crate::mobject::Mobject;
@@ -5,7 +6,12 @@ use crate::renderer::Renderer;
 use anyhow::Result;
 
 pub struct Scene {
+    // The "committed" state of mobjects (updated sequentially as animations are added)
     mobjects: Vec<Box<dyn Mobject>>,
+    // The state of mobjects before any animations were applied
+    baseline_mobjects: Option<Vec<Box<dyn Mobject>>>,
+    animations: Vec<Animation>,
+
     pub fps: u32,
     pub width: u32,
     pub height: u32,
@@ -15,52 +21,128 @@ impl Scene {
     pub fn new(width: u32, height: u32, fps: u32) -> Self {
         Self {
             mobjects: Vec::new(),
+            baseline_mobjects: None,
+            animations: Vec::new(),
             fps,
             width,
             height,
         }
     }
 
-    pub fn add(&mut self, mut mobject: Box<dyn Mobject>) {
-        // Auto-assign ID if empty
+    pub fn add(&mut self, mut mobject: Box<dyn Mobject>) -> MobjectId {
+        let id = self.mobjects.len();
         if mobject.id().is_empty() {
-            mobject.set_id(format!("mobj_{}", self.mobjects.len()));
+            mobject.set_id(id.to_string());
         }
         self.mobjects.push(mobject);
+        id
     }
 
-    /// Renders the scene to an MP4 file.
-    /// For this foundation, we implement a simple 3-second horizontal move animation.
+    /// Queues an animation. Resolves the `start` state based on the current
+    /// committed state, and updates the committed state to the `end` state.
+    pub fn play(&mut self, mut anim: Animation) {
+        // Save the baseline state before the first animation is applied
+        if self.baseline_mobjects.is_none() {
+            self.baseline_mobjects = Some(self.mobjects.clone());
+        }
+
+        let mobj = &self.mobjects[anim.target_id];
+
+        // 1. Resolve Start States
+        match &mut anim.kind {
+            crate::animation::AnimationKind::MoveTo { start, .. } => {
+                *start = mobj.position();
+            }
+            crate::animation::AnimationKind::FadeIn {
+                start_alpha,
+                end_alpha,
+            } => {
+                *start_alpha = mobj.opacity();
+                *end_alpha = 1.0;
+            }
+            crate::animation::AnimationKind::FadeOut {
+                start_alpha,
+                end_alpha,
+            } => {
+                *start_alpha = mobj.opacity();
+                *end_alpha = 0.0;
+            }
+        }
+
+        // 2. Commit End States to the Scene's mobjects for the next animation
+        match &anim.kind {
+            crate::animation::AnimationKind::MoveTo { end, .. } => {
+                self.mobjects[anim.target_id].set_position(*end);
+            }
+            crate::animation::AnimationKind::FadeIn { end_alpha, .. }
+            | crate::animation::AnimationKind::FadeOut { end_alpha, .. } => {
+                self.mobjects[anim.target_id].set_opacity(*end_alpha);
+            }
+        }
+
+        self.animations.push(anim);
+    }
+
     pub fn render_to_file(self, output_path: &str) -> Result<()> {
+        let total_duration: f64 = self.animations.iter().map(|a| a.duration).sum();
+        let total_frames = (total_duration * self.fps as f64).ceil() as u32;
+
         let mut encoder = VideoEncoder::new(output_path, self.width, self.height, self.fps)?;
         let renderer = Renderer::new(self.width, self.height);
 
-        let total_duration = 3.0; // 3 seconds
-        let total_frames = (total_duration * self.fps as f64) as u32;
+        println!(
+            "🎬 Rendering {} frames ({:.1}s)...",
+            total_frames, total_duration
+        );
 
-        println!("🎬 Rendering {} frames...", total_frames);
+        // Start from the state before any animations
+        let mut current_state = self
+            .baseline_mobjects
+            .unwrap_or_else(|| self.mobjects.clone());
+        let mut anim_idx = 0;
+        let mut anim_time = 0.0;
+        let frame_duration = 1.0 / self.fps as f64;
 
-        for frame_idx in 0..total_frames {
-            let t = frame_idx as f64 / self.fps as f64;
-            let progress = (t / total_duration) as f32;
+        for _ in 0..total_frames {
+            let mut frame_state = current_state.clone();
 
-            // Apply easing
-            let eased = easing::ease_in_out(progress as f64) as f32;
+            if anim_idx < self.animations.len() {
+                let anim = &self.animations[anim_idx];
+                let t = (anim_time / anim.duration).clamp(0.0, 1.0);
+                let eased = easing::ease_in_out(t);
 
-            // Clone the initial state of all mobjects for this frame
-            let mut current_mobjects = self.mobjects.clone();
+                let mobj = &mut frame_state[anim.target_id];
+                match &anim.kind {
+                    crate::animation::AnimationKind::MoveTo { start, end } => {
+                        mobj.set_position(start.lerp(*end, eased as f32));
+                    }
+                    crate::animation::AnimationKind::FadeIn {
+                        start_alpha,
+                        end_alpha,
+                    }
+                    | crate::animation::AnimationKind::FadeOut {
+                        start_alpha,
+                        end_alpha,
+                    } => {
+                        let alpha = start_alpha + (end_alpha - start_alpha) * eased as f32;
+                        mobj.set_opacity(alpha);
+                    }
+                }
 
-            // Apply animations (Hardcoded for the demo: move "mobj_0" from left to right)
-            for mobj in &mut current_mobjects {
-                if mobj.id() == "mobj_0" {
-                    let start = glam::Vec2::new(-4.0, 0.0);
-                    let end = glam::Vec2::new(4.0, 0.0);
-                    mobj.set_position(start.lerp(end, eased));
+                anim_time += frame_duration;
+
+                // If animation is complete, commit its final state to `current_state`
+                if anim_time >= anim.duration {
+                    let final_mobj = &frame_state[anim.target_id];
+                    current_state[anim.target_id].set_position(final_mobj.position());
+                    current_state[anim.target_id].set_opacity(final_mobj.opacity());
+
+                    anim_idx += 1;
+                    anim_time = 0.0;
                 }
             }
 
-            // Render and write frame
-            let frame = renderer.render_frame(&current_mobjects);
+            let frame = renderer.render_frame(&frame_state);
             encoder.write_frame(&frame)?;
         }
 

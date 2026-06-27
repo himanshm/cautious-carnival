@@ -1,11 +1,13 @@
 use crate::mobject::Mobject;
 use cosmic_text::{
-    Attrs, Buffer, CacheKey, CacheKeyFlags, Family, FontSystem, Metrics, Shaping, SwashCache,
+    Attrs, Buffer, CacheKey, CacheKeyFlags, Family, FontSystem, Metrics, Shaping, SubpixelBin,
+    SwashCache,
 };
 use glam::Vec2;
 use image::RgbaImage;
 use kurbo::Affine;
-use peniko::{Blob, Color, Format, Image};
+use peniko::{Blob, Color};
+use peniko::{Format, Image};
 use std::sync::Arc;
 use vello::Scene;
 
@@ -60,10 +62,11 @@ impl Text {
         let metrics = Metrics::new(font_size, font_size * 1.3);
         let mut buffer = Buffer::new(&mut font_system, metrics);
 
-        buffer.set_size(&mut font_system, Some(4000.0), Some(2000.0));
+        buffer.set_size(Some(4000.0), Some(2000.0));
 
-        let fs = Attrs::new().family(Family::SansSerif);
-        buffer.set_text(&mut font_system, content, &fs, Shaping::Advanced, None);
+        let attrs = Attrs::new().family(Family::SansSerif);
+        // Fix: pass attrs by value (not reference)
+        buffer.set_text(content, attrs, Shaping::Advanced);
 
         let mut min_x: i32 = i32::MAX;
         let mut min_y: i32 = i32::MAX;
@@ -79,8 +82,8 @@ impl Text {
                     font_id: glyph.font_id,
                     glyph_id: glyph.glyph_id,
                     font_size_bits: glyph.font_size.to_bits(),
-                    x_bin: cosmic_text::SubpixelBin::Zero,
-                    y_bin: cosmic_text::SubpixelBin::Zero,
+                    x_bin: SubpixelBin::Zero,
+                    y_bin: SubpixelBin::Zero,
                     flags: CacheKeyFlags::empty(),
                     font_weight: glyph.font_weight,
                 };
@@ -207,7 +210,7 @@ impl Mobject for Text {
             .clone()
             .into_boxed_slice()
             .into();
-        let blob = Blob::new(raw);
+        let blob = Blob::new(raw as Arc<dyn AsRef<[u8]> + Send + Sync>);
         let image = Image::new(
             blob,
             Format::Rgba8,
@@ -215,7 +218,8 @@ impl Mobject for Text {
             self.tinted_raster.height(),
         );
 
-        let rect = kurbo::Rect::new(screen_pt.x, screen_pt.y, screen_pt.x + w, screen_pt.y + h);
-        scene.draw_image(&image, rect);
+        let image_transform =
+            Affine::translate((screen_pt.x, screen_pt.y)) * Affine::scale_non_uniform(w, h);
+        scene.draw_image(&image, image_transform);
     }
 }

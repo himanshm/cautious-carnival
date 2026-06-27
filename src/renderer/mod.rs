@@ -23,29 +23,25 @@ pub struct GpuRenderer {
 
 impl GpuRenderer {
     pub fn new(width: u32, height: u32) -> Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
 
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             compatible_surface: None,
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
         }))
-        .map_err(|e| anyhow::anyhow!("No GPU adapter found: {:?}", e))?;
+        .context("No GPU adapter found")?;
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("cautious-carnival-device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                memory_hints: wgpu::MemoryHints::Performance,
-                trace: wgpu::Trace::Off,
-            },
-            None,
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("cautious-carnival-device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        }))
         .context("Failed to create GPU device")?;
 
-        // vello 0.9: RendererOptions no longer has surface_format field
         let vello_renderer = Renderer::new(
             &device,
             RendererOptions {
@@ -110,9 +106,8 @@ impl GpuRenderer {
 
         let texture_view = self.texture.create_view(&TextureViewDescriptor::default());
 
-        // vello 0.9: RenderParams uses peniko Color
         let render_params = RenderParams {
-            base_color: Color::new([0.07, 0.07, 0.07, 1.0]), // Dark gray
+            base_color: Color::new([0.07, 0.07, 0.07, 1.0]),
             width: self.width,
             height: self.height,
             antialiasing_method: AaConfig::Area,
@@ -163,7 +158,7 @@ impl GpuRenderer {
         buffer_slice.map_async(MapMode::Read, move |result| {
             sender.send(result).ok();
         });
-        self.device.poll(Maintain::Wait);
+        self.device.poll(Maintain::Poll);
         receiver
             .recv()
             .expect("Channel closed")

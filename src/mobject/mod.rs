@@ -1,6 +1,6 @@
 use glam::Vec2;
 use kurbo::Affine;
-use peniko::Color;
+use peniko::{Brush, Color, Fill};
 use vello::Scene;
 
 pub trait Mobject: Send + Sync {
@@ -38,7 +38,7 @@ impl Circle {
             id: String::new(),
             center: Vec2::ZERO,
             radius,
-            color: Color::new([0.204, 0.596, 0.859, 1.0]), // Blue
+            color: Color::new([0.204, 0.596, 0.859, 1.0]),
             opacity: 1.0,
         }
     }
@@ -84,14 +84,14 @@ impl Mobject for Circle {
             self.radius as f64,
         );
 
-        // Apply opacity to alpha channel
         let components = self.color.components;
-        let brush = Color::new([
+        let color_with_alpha = Color::new([
             components[0],
             components[1],
             components[2],
             components[3] * self.opacity,
         ]);
+        let brush = Brush::Solid(color_with_alpha);
 
         scene.fill(Fill::NonZero, transform, &brush, None, &circle);
     }
@@ -112,7 +112,7 @@ impl Square {
             id: String::new(),
             center: Vec2::ZERO,
             side_length,
-            color: Color::new([0.906, 0.298, 0.235, 1.0]), // Red
+            color: Color::new([0.906, 0.298, 0.235, 1.0]),
             opacity: 1.0,
         }
     }
@@ -159,12 +159,13 @@ impl Mobject for Square {
         let rect = kurbo::Rect::new(cx - half, cy - half, cx + half, cy + half);
 
         let components = self.color.components;
-        let brush = Color::new([
+        let color_with_alpha = Color::new([
             components[0],
             components[1],
             components[2],
             components[3] * self.opacity,
         ]);
+        let brush = Brush::Solid(color_with_alpha);
 
         scene.fill(Fill::NonZero, transform, &brush, None, &rect);
     }

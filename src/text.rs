@@ -3,36 +3,37 @@ use cosmic_text::{
     Attrs, Buffer, CacheKey, CacheKeyFlags, Family, FontSystem, Metrics, Shaping, SwashCache,
 };
 use glam::Vec2;
-use tiny_skia::{Color, Pixmap, PremultipliedColorU8, Transform};
+use image::RgbaImage;
+use kurbo::Affine;
+use peniko::{Blob, Color, Format, Image};
+use std::sync::Arc;
+use vello::Scene;
 
-/// A text mobject rendered via cosmic-text.
-/// The text is rasterized once at creation and cached as a Pixmap.
 #[derive(Clone)]
 pub struct Text {
     id: String,
     position: Vec2,
     color: Color,
     opacity: f32,
-    /// Pre-rasterized text bitmap (RGBA, premultiplied).
-    raster: Pixmap,
-    /// Offset from `position` to the top-left of the raster (in Manim units).
+    raster: Arc<RgbaImage>,
+    tinted_raster: Arc<RgbaImage>,
     offset: Vec2,
 }
 
 impl Text {
-    /// Creates a new Text mobject. `font_size` is in Manim units (1 unit = 100 px).
     pub fn new(content: &str, font_size: f32) -> Self {
         let pixel_size = font_size * 100.0;
-        let (raster, width_px, height_px) = Self::rasterize(content, pixel_size, Color::WHITE);
+        let (raster, width_px, height_px) = Self::rasterize(content, pixel_size);
+        let raster = Arc::new(raster);
 
-        // Center the text horizontally and vertically around the origin
         let offset = Vec2::new(-(width_px as f32) / 200.0, (height_px as f32) / 200.0);
 
         Self {
             id: String::new(),
             position: Vec2::ZERO,
-            color: Color::WHITE,
+            color: Color::new([1.0, 1.0, 1.0, 1.0]),
             opacity: 1.0,
+            tinted_raster: raster.clone(),
             raster,
             offset,
         }
@@ -40,11 +41,21 @@ impl Text {
 
     pub fn with_color(mut self, color: Color) -> Self {
         self.color = color;
+        self.update_tint();
         self
     }
 
-    /// Rasterizes text into an RGBA Pixmap. Returns (pixmap, width, height).
-    fn rasterize(content: &str, font_size: f32, _default_color: Color) -> (Pixmap, u32, u32) {
+    fn update_tint(&mut self) {
+        let components = self.color.components;
+        let is_white = components[0] == 1.0 && components[1] == 1.0 && components[2] == 1.0;
+        if is_white && self.opacity == 1.0 {
+            self.tinted_raster = self.raster.clone();
+        } else {
+            self.tinted_raster = Arc::new(Self::tint_image(&self.raster, self.color, self.opacity));
+        }
+    }
+
+    fn rasterize(content: &str, font_size: f32) -> (RgbaImage, u32, u32) {
         let mut font_system = FontSystem::new();
         let metrics = Metrics::new(font_size, font_size * 1.3);
         let mut buffer = Buffer::new(&mut font_system, metrics);
@@ -99,72 +110,51 @@ impl Text {
         }
 
         if min_x == i32::MAX {
-            return (Pixmap::new(1, 1).unwrap(), 1, 1);
+            return (RgbaImage::new(1, 1), 1, 1);
         }
 
         let width = (max_x - min_x) as u32;
         let height = (max_y - min_y) as u32;
-        let mut pixmap = Pixmap::new(width, height).unwrap();
+        let mut img = RgbaImage::new(width, height);
 
         for (gx, gy, w, h, data) in glyph_data {
             let ox = gx - min_x;
             let oy = gy - min_y;
-            Self::blend_glyph(&mut pixmap, ox, oy, w, h, &data);
+            for y in 0..h {
+                for x in 0..w {
+                    let alpha = data[(y * w + x) as usize];
+                    if alpha == 0 {
+                        continue;
+                    }
+                    let px = (ox + x as i32) as u32;
+                    let py = (oy + y as i32) as u32;
+                    if px < width && py < height {
+                        img.put_pixel(px, py, image::Rgba([255, 255, 255, alpha]));
+                    }
+                }
+            }
         }
 
-        (pixmap, width, height)
+        (img, width, height)
     }
 
-    /// Blends a single glyph's alpha mask into the pixmap as white pixels.
-    fn blend_glyph(pixmap: &mut Pixmap, ox: i32, oy: i32, w: u32, h: u32, data: &[u8]) {
-        let pw = pixmap.width() as i32;
-        let ph = pixmap.height() as i32;
-        let pixels = pixmap.pixels_mut();
+    fn tint_image(src: &RgbaImage, color: Color, opacity: f32) -> RgbaImage {
+        let components = color.components;
+        let cr = (components[0] * 255.0) as u8;
+        let cg = (components[1] * 255.0) as u8;
+        let cb = (components[2] * 255.0) as u8;
+        let alpha_mult = opacity;
 
-        for y in 0..h as i32 {
-            let dst_y = oy + y;
-            if dst_y < 0 || dst_y >= ph {
+        let mut dst = RgbaImage::new(src.width(), src.height());
+        for (x, y, pixel) in src.enumerate_pixels() {
+            let sa = pixel[3] as f32;
+            if sa == 0.0 {
                 continue;
             }
-            for x in 0..w as i32 {
-                let dst_x = ox + x;
-                if dst_x < 0 || dst_x >= pw {
-                    continue;
-                }
-
-                let alpha = data[(y * w as i32 + x) as usize];
-                if alpha == 0 {
-                    continue;
-                }
-
-                let idx = (dst_y * pw + dst_x) as usize;
-                let pixel = &mut pixels[idx];
-
-                let sa = alpha as u32;
-                let inv_sa = 255 - sa;
-
-                let da = pixel.alpha() as u32;
-                let dr = pixel.red() as u32;
-                let dg = pixel.green() as u32;
-                let db = pixel.blue() as u32;
-
-                // Source-over blend (premultiplied alpha)
-                let out_a = sa + (da * inv_sa) / 255;
-                let out_r = (255 * sa + dr * inv_sa) / 255;
-                let out_g = (255 * sa + dg * inv_sa) / 255;
-                let out_b = (255 * sa + db * inv_sa) / 255;
-
-                // FIX: Pass the PREMULIPLIED values directly.
-                // from_rgba expects r <= a, g <= a, b <= a.
-                *pixel = PremultipliedColorU8::from_rgba(
-                    out_r as u8,
-                    out_g as u8,
-                    out_b as u8,
-                    out_a as u8,
-                )
-                .unwrap();
-            }
+            let new_a = (sa * alpha_mult) as u8;
+            dst.put_pixel(x, y, image::Rgba([cr, cg, cb, new_a]));
         }
+        dst
     }
 }
 
@@ -184,75 +174,48 @@ impl Mobject for Text {
     fn color(&self) -> Color {
         self.color
     }
+
     fn set_color(&mut self, color: Color) {
         self.color = color;
+        self.update_tint();
     }
+
     fn opacity(&self) -> f32 {
         self.opacity
     }
+
     fn set_opacity(&mut self, opacity: f32) {
         self.opacity = opacity;
+        self.update_tint();
     }
+
     fn clone_box(&self) -> Box<dyn Mobject> {
         Box::new(self.clone())
     }
 
-    fn render_onto(&self, pixmap: &mut Pixmap, transform: Transform) {
+    fn add_to_scene(&self, scene: &mut Scene, transform: Affine) {
         let top_left = self.position + self.offset;
 
-        let mut screen_pt = tiny_skia::Point::from_xy(top_left.x, top_left.y);
-        transform.map_point(&mut screen_pt);
+        let screen_pt = transform * kurbo::Point::new(top_left.x as f64, top_left.y as f64);
 
-        let dst_x = screen_pt.x as i32;
-        let dst_y = screen_pt.y as i32;
+        let w = self.tinted_raster.width() as f64;
+        let h = self.tinted_raster.height() as f64;
 
-        let scale = transform.sx;
-
-        let tinted = Self::tint_pixmap(&self.raster, self.color, self.opacity);
-
-        pixmap.draw_pixmap(
-            dst_x,
-            dst_y,
-            tinted.as_ref(),
-            &tiny_skia::PixmapPaint::default(),
-            tiny_skia::Transform::from_scale(scale, scale),
-            None,
+        let raw: Arc<[u8]> = self
+            .tinted_raster
+            .as_raw()
+            .clone()
+            .into_boxed_slice()
+            .into();
+        let blob = Blob::new(raw);
+        let image = Image::new(
+            blob,
+            Format::Rgba8,
+            self.tinted_raster.width(),
+            self.tinted_raster.height(),
         );
-    }
-}
 
-impl Text {
-    /// Creates a color-tinted copy of the raster.
-    fn tint_pixmap(src: &Pixmap, color: Color, opacity: f32) -> Pixmap {
-        let mut dst = Pixmap::new(src.width(), src.height()).unwrap();
-        let src_pixels = src.pixels();
-        let dst_pixels = dst.pixels_mut();
-
-        let cr = (color.red() * 255.0) as u32;
-        let cg = (color.green() * 255.0) as u32;
-        let cb = (color.blue() * 255.0) as u32;
-        let alpha_mult = (opacity * 255.0) as u32;
-
-        for (s, d) in src_pixels.iter().zip(dst_pixels.iter_mut()) {
-            let sa = s.alpha() as u32;
-            if sa == 0 {
-                *d = PremultipliedColorU8::from_rgba(0, 0, 0, 0).unwrap();
-                continue;
-            }
-
-            let orig_a = sa;
-            let new_a = (orig_a * alpha_mult) / 255;
-
-            // FIX: We must premultiply the target color by the new alpha
-            // before passing it to from_rgba, otherwise r > a and it returns None.
-            let new_r = (cr * new_a) / 255;
-            let new_g = (cg * new_a) / 255;
-            let new_b = (cb * new_a) / 255;
-
-            *d =
-                PremultipliedColorU8::from_rgba(new_r as u8, new_g as u8, new_b as u8, new_a as u8)
-                    .unwrap();
-        }
-        dst
+        let rect = kurbo::Rect::new(screen_pt.x, screen_pt.y, screen_pt.x + w, screen_pt.y + h);
+        scene.draw_image(&image, rect);
     }
 }

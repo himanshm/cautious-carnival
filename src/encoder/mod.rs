@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use ffmpeg_sidecar::{child::FfmpegChild, command::FfmpegCommand};
-use image::RgbaImage;
 use std::io::Write;
 use std::process::ChildStdin;
 
@@ -29,7 +28,7 @@ impl VideoEncoder {
             .input("pipe:0")
             .args(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast"])
             .overwrite()
-            .arg(output_path)
+            .output(output_path)
             .spawn()
             .context("Failed to spawn FFmpeg. Is FFmpeg installed on your system?")?;
 
@@ -45,34 +44,30 @@ impl VideoEncoder {
         })
     }
 
-    pub fn write_frame(&mut self, frame: &RgbaImage) -> Result<()> {
-        if frame.width() != self.width || frame.height() != self.height {
+    pub fn write_frame(&mut self, frame_data: &[u8]) -> Result<()> {
+        let expected_len = (self.width * self.height * 4) as usize;
+        if frame_data.len() != expected_len {
             anyhow::bail!(
-                "Frame size {}x{} does not match encoder size {}x{}",
-                frame.width(),
-                frame.height(),
+                "Frame data length {} does not match expected {} ({}x{}x4)",
+                frame_data.len(),
+                expected_len,
                 self.width,
                 self.height
             );
         }
 
         self.stdin
-            .write_all(frame.as_raw())
+            .write_all(frame_data)
             .context("Failed to write frame to FFmpeg")?;
-
         Ok(())
     }
 
     pub fn finish(mut self) -> Result<()> {
-        // Closing stdin signals EOF to FFmpeg.
         drop(self.stdin);
-
         let status = self.process.wait()?;
-
         if !status.success() {
             anyhow::bail!("FFmpeg exited with status {}", status);
         }
-
         Ok(())
     }
 }

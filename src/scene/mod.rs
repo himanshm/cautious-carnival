@@ -2,16 +2,13 @@ use crate::animation::{Animation, MobjectId};
 use crate::encoder::VideoEncoder;
 use crate::math::easing;
 use crate::mobject::Mobject;
-use crate::renderer::Renderer;
+use crate::renderer::GpuRenderer;
 use anyhow::Result;
 
 pub struct Scene {
-    // The "committed" state of mobjects (updated sequentially as animations are added)
     mobjects: Vec<Box<dyn Mobject>>,
-    // The state of mobjects before any animations were applied
     baseline_mobjects: Option<Vec<Box<dyn Mobject>>>,
     animations: Vec<Animation>,
-
     pub fps: u32,
     pub width: u32,
     pub height: u32,
@@ -38,17 +35,13 @@ impl Scene {
         id
     }
 
-    /// Queues an animation. Resolves the `start` state based on the current
-    /// committed state, and updates the committed state to the `end` state.
     pub fn play(&mut self, mut anim: Animation) {
-        // Save the baseline state before the first animation is applied
         if self.baseline_mobjects.is_none() {
             self.baseline_mobjects = Some(self.mobjects.clone());
         }
 
         let mobj = &self.mobjects[anim.target_id];
 
-        // 1. Resolve Start States
         match &mut anim.kind {
             crate::animation::AnimationKind::MoveTo { start, .. } => {
                 *start = mobj.position();
@@ -69,7 +62,6 @@ impl Scene {
             }
         }
 
-        // 2. Commit End States to the Scene's mobjects for the next animation
         match &anim.kind {
             crate::animation::AnimationKind::MoveTo { end, .. } => {
                 self.mobjects[anim.target_id].set_position(*end);
@@ -88,19 +80,18 @@ impl Scene {
         let total_frames = (total_duration * self.fps as f64).ceil() as u32;
 
         let mut encoder = VideoEncoder::new(output_path, self.width, self.height, self.fps)?;
-        let renderer = Renderer::new(self.width, self.height);
+        let mut renderer = GpuRenderer::new(self.width, self.height)?;
 
         println!(
-            "🎬 Rendering {} frames ({:.1}s)...",
+            "🎬 Rendering {} frames ({:.1}s) on GPU...",
             total_frames, total_duration
         );
 
-        // Start from the state before any animations
         let mut current_state = self
             .baseline_mobjects
             .unwrap_or_else(|| self.mobjects.clone());
         let mut anim_idx = 0;
-        let mut anim_time = 0.0;
+        let mut anim_time: f64 = 0.0;
         let frame_duration = 1.0 / self.fps as f64;
 
         for _ in 0..total_frames {
@@ -114,7 +105,7 @@ impl Scene {
                 let mobj = &mut frame_state[anim.target_id];
                 match &anim.kind {
                     crate::animation::AnimationKind::MoveTo { start, end } => {
-                        mobj.set_position(start.lerp(*end, eased as f32));
+                        mobj.set_position(start.lerp(end.clone(), eased as f32));
                     }
                     crate::animation::AnimationKind::FadeIn {
                         start_alpha,
@@ -131,7 +122,6 @@ impl Scene {
 
                 anim_time += frame_duration;
 
-                // If animation is complete, commit its final state to `current_state`
                 if anim_time >= anim.duration {
                     let final_mobj = &frame_state[anim.target_id];
                     current_state[anim.target_id].set_position(final_mobj.position());
@@ -142,8 +132,8 @@ impl Scene {
                 }
             }
 
-            let frame = renderer.render_frame(&frame_state);
-            encoder.write_frame(&frame)?;
+            let frame_data = renderer.render_frame(&frame_state);
+            encoder.write_frame(frame_data)?;
         }
 
         encoder.finish()?;

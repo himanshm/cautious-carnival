@@ -1,5 +1,7 @@
 use glam::Vec2;
-use tiny_skia::{Color, Pixmap, Transform};
+use kurbo::Affine;
+use peniko::Color;
+use vello::Scene;
 
 pub trait Mobject: Send + Sync {
     fn id(&self) -> &str;
@@ -11,9 +13,7 @@ pub trait Mobject: Send + Sync {
     fn opacity(&self) -> f32;
     fn set_opacity(&mut self, opacity: f32);
 
-    /// Renders the mobject onto the given pixmap using the provided coordinate transform.
-    fn render_onto(&self, pixmap: &mut Pixmap, transform: Transform);
-
+    fn add_to_scene(&self, scene: &mut Scene, transform: Affine);
     fn clone_box(&self) -> Box<dyn Mobject>;
 }
 
@@ -22,9 +22,6 @@ impl Clone for Box<dyn Mobject> {
         self.clone_box()
     }
 }
-
-// --- Circle and Square now implement render_onto ---
-// (Move the fill_path logic from renderer/mod.rs into here)
 
 #[derive(Clone)]
 pub struct Circle {
@@ -41,10 +38,11 @@ impl Circle {
             id: String::new(),
             center: Vec2::ZERO,
             radius,
-            color: Color::from_rgba8(52, 152, 219, 255),
+            color: Color::new([0.204, 0.596, 0.859, 1.0]), // Blue
             opacity: 1.0,
         }
     }
+
     pub fn with_color(mut self, color: Color) -> Self {
         self.color = color;
         self
@@ -80,34 +78,22 @@ impl Mobject for Circle {
         Box::new(self.clone())
     }
 
-    fn render_onto(&self, pixmap: &mut Pixmap, transform: Transform) {
-        use tiny_skia::{FillRule, Paint, PathBuilder};
-        let mut pb = PathBuilder::new();
-        let k = 0.5522847498 * self.radius;
-        let r = self.radius;
-        let cx = self.center.x;
-        let cy = self.center.y;
+    fn add_to_scene(&self, scene: &mut Scene, transform: Affine) {
+        let circle = kurbo::Circle::new(
+            kurbo::Point::new(self.center.x as f64, self.center.y as f64),
+            self.radius as f64,
+        );
 
-        pb.move_to(cx, cy - r);
-        pb.cubic_to(cx + k, cy - r, cx + r, cy - k, cx + r, cy);
-        pb.cubic_to(cx + r, cy + k, cx + k, cy + r, cx, cy + r);
-        pb.cubic_to(cx - k, cy + r, cx - r, cy + k, cx - r, cy);
-        pb.cubic_to(cx - r, cy - k, cx - k, cy - r, cx, cy - r);
-        pb.close();
+        // Apply opacity to alpha channel
+        let components = self.color.components;
+        let brush = Color::new([
+            components[0],
+            components[1],
+            components[2],
+            components[3] * self.opacity,
+        ]);
 
-        if let Some(path) = pb.finish() {
-            let mut paint = Paint::default();
-            paint.anti_alias = true;
-            let c = self.color;
-            let final_alpha = (c.alpha() * self.opacity * 255.0) as u8;
-            paint.set_color_rgba8(
-                (c.red() * 255.0) as u8,
-                (c.green() * 255.0) as u8,
-                (c.blue() * 255.0) as u8,
-                final_alpha,
-            );
-            pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
-        }
+        scene.fill(Fill::NonZero, transform, &brush, None, &circle);
     }
 }
 
@@ -126,9 +112,14 @@ impl Square {
             id: String::new(),
             center: Vec2::ZERO,
             side_length,
-            color: Color::from_rgba8(231, 76, 60, 255),
+            color: Color::new([0.906, 0.298, 0.235, 1.0]), // Red
             opacity: 1.0,
         }
+    }
+
+    pub fn with_color(mut self, color: Color) -> Self {
+        self.color = color;
+        self
     }
 }
 
@@ -161,31 +152,20 @@ impl Mobject for Square {
         Box::new(self.clone())
     }
 
-    fn render_onto(&self, pixmap: &mut Pixmap, transform: Transform) {
-        use tiny_skia::{FillRule, Paint, PathBuilder};
-        let mut pb = PathBuilder::new();
-        let half = self.side_length / 2.0;
-        let cx = self.center.x;
-        let cy = self.center.y;
+    fn add_to_scene(&self, scene: &mut Scene, transform: Affine) {
+        let half = self.side_length as f64 / 2.0;
+        let cx = self.center.x as f64;
+        let cy = self.center.y as f64;
+        let rect = kurbo::Rect::new(cx - half, cy - half, cx + half, cy + half);
 
-        pb.move_to(cx - half, cy - half);
-        pb.line_to(cx + half, cy - half);
-        pb.line_to(cx + half, cy + half);
-        pb.line_to(cx - half, cy + half);
-        pb.close();
+        let components = self.color.components;
+        let brush = Color::new([
+            components[0],
+            components[1],
+            components[2],
+            components[3] * self.opacity,
+        ]);
 
-        if let Some(path) = pb.finish() {
-            let mut paint = Paint::default();
-            paint.anti_alias = true;
-            let c = self.color;
-            let final_alpha = (c.alpha() * self.opacity * 255.0) as u8;
-            paint.set_color_rgba8(
-                (c.red() * 255.0) as u8,
-                (c.green() * 255.0) as u8,
-                (c.blue() * 255.0) as u8,
-                final_alpha,
-            );
-            pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
-        }
+        scene.fill(Fill::NonZero, transform, &brush, None, &rect);
     }
 }

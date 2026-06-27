@@ -2,10 +2,10 @@
 name = "cautious-carnival"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85" 
+rust-version = "1.95"
 
 description = "A manim inspired crate"
-license = "GPL-3.0" 
+license = "GPL-3.0"
 
 
 repository = "https://github.com/himanshm/cautious-carnival"
@@ -20,9 +20,13 @@ categories = ["graphics", "rendering"]
 
 [dependencies]
 anyhow = "1.0.103"
-cosmic-text = "0.17.0"
+cosmic-text = "0.19.0"
 ffmpeg-sidecar = "2.5.2"
 glam = "0.33.1"
-image = "0.25.9"
+image = "0.25.10"
+kurbo = "0.13.1"
+peniko = "0.6.1"
+pollster = "0.4.0"
 rayon = "1.12.0"
-tiny-skia = "0.12.0"
+vello = "0.9.0"
+wgpu = "29.0.3"

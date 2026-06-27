@@ -2,5 +2,20 @@
 name = "cautious-carnival"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85" 
+
+description = "A manim inspired crate"
+license = "GPL-3.0" 
+
+
+repository = "https://github.com/himanshm/cautious-carnival"
+homepage = "https://github.com/himanshm/cautious-carnival"
+documentation = "https://docs.rs/cautious-carnival"
+readme = "README.md"
+
+
+keywords = ["manim", "animation", "math", "graphics", "visualization"]
+
+categories = ["graphics", "rendering"]
 
 [dependencies]

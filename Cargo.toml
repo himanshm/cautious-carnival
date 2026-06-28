@@ -1,6 +1,6 @@
 [package]
 name = "cautious-carnival"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Himansh Mewada <himanshmewada06@atomicmail.io>"]
 license = "GPL-3.0"
@@ -13,25 +13,48 @@ exclude = ["/examples", "/tests", "/.github"]
 
 [features]
 default = ["svg"]
-# SVG renderer (always-on, zero-dep)
+# SVG renderer (always-on, zero-dep). Writes one self-contained SVG file
+# with every frame stacked as a <g> layer — handy as a storyboard.
 svg = []
-# Optional: raster renderer via `image` + `tiny-skia`
+# Raster renderer via `tiny-skia` + `image`. Writes a PNG frame sequence
+# to a directory. Anti-aliased, high quality.
 raster = ["dep:tiny-skia", "dep:image"]
-# Optional: video output via `ffmpeg-next`
-video = ["dep:ffmpeg-next"]
-# Optional: parallel frame rendering
+# Animated GIF output via the pure-Rust `gif` crate. No system dependencies
+# — works out of the box. Great for short loops and demos.
+gif = ["dep:gif", "raster"]
+# MP4 / WebM / MKV video output via `ffmpeg-sidecar`. Pure Rust at build
+# time — no `pkg-config`, no C dev headers, no linking. At runtime the
+# crate spawns the system `ffmpeg` binary as a subprocess and pipes raw
+# RGBA frames to it via stdin.  Requires `ffmpeg` on the system `PATH`.
+video = ["dep:ffmpeg-sidecar", "raster"]
+# Convenience feature: enables `ffmpeg-sidecar/download_ffmpeg`, which can
+# auto-download a prebuilt `ffmpeg` binary on first use if the system
+# doesn't have one. Adds network + tar/zip deps to the build, so it's
+# opt-in.
+video-download = ["video", "ffmpeg-sidecar/download_ffmpeg"]
+# Parallel frame rendering via `rayon`. Speeds up rasterization-bound
+# scenes by rendering frames across all CPU cores. Works with the
+# `raster`, `gif`, and `video` backends.
 parallel = ["dep:rayon"]
 
 [dependencies]
 # Core has zero required dependencies by default — keeps the crate embeddable.
 # Optional backends are pulled in only when the corresponding feature is enabled.
 
-# Raster backend
+# Raster backend (also used by `gif` and `video`)
+fontdue = "0.9"
 tiny-skia = { version = "0.11", optional = true }
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 
-# Video backend
-ffmpeg-next = { version = "7.0", optional = true }
+# Animated GIF backend — pure Rust, no system deps.
+# `color_quant` is needed for `Encoder::new` and `Frame::from_rgba_speed`.
+gif = { version = "0.13", optional = true, default-features = false, features = ["std", "color_quant", "raii_no_panic"] }
+
+# Video backend (MP4 / WebM / etc.) — pure-Rust subprocess wrapper around
+# the system `ffmpeg` binary.  No C bindings, no build-time linking.
+# `default-features = false` keeps the build lean; enable the
+# `video-download` feature (below) to opt into automatic ffmpeg download.
+ffmpeg-sidecar = { version = "2", optional = true, default-features = false }
 
 # Parallel rendering
 rayon = { version = "1.10", optional = true }
@@ -44,10 +67,20 @@ tempfile = "3.10"
 name = "cautious_carnival"
 path = "src/lib.rs"
 
+# The single example auto-selects a backend at compile time based on which
+# feature flag is enabled. Build with, for example:
+#
+#   cargo run --example hello_circle                       # SVG (default)
+#   cargo run --example hello_circle --features gif        # animated GIF
+#   cargo run --example hello_circle --features video      # MP4 via FFmpeg
+#   cargo run --example hello_circle --features raster     # PNG sequence
+#   cargo run --example hello_circle --release --features gif  # optimised
+#
+# When more than one backend feature is enabled, the example prefers
+# `video`, then `gif`, then `raster`, then `svg`.
 [[example]]
 name = "hello_circle"
 path = "examples/hello_circle.rs"
-required-features = ["svg"]
 
 [profile.release]
 opt-level = 3

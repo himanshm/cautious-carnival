@@ -46,7 +46,7 @@
 //! # #[cfg(feature = "gif")] {
 //! use cautious_carnival::*;
 //!
-//! let renderer = Box::new(GifRenderer::new("out.gif", 640, 360, 30));
+//! let renderer = Box::new(GifRenderer::new("out.gif", 640, 360, 30).unwrap());
 //! let mut scene = Scene::new(renderer, SceneConfig::default());
 //! let circle = Circle::new(1.0).with_color(Color::BLUE);
 //! scene.play(FadeIn::new(circle.clone_box(), 1.0));
@@ -84,6 +84,54 @@
 
 use std::fmt;
 use std::time::Duration as StdDuration;
+
+// ---------------------------------------------------------------------------
+// Font discovery — placeholder filenames + runtime `src/` directory scan
+// ---------------------------------------------------------------------------
+//
+// The raster / gif / video backends ship with a built-in 5x7 ASCII bitmap
+// font so they work out-of-the-box with zero configuration.  When you need
+// nicer text rendering, drop one or two `.ttf` files into the crate's
+// `src/` directory and they will be auto-discovered at runtime.
+//
+// The two constants below are *placeholders* — replace the strings with
+// the actual filenames you placed in `src/` (e.g. `"Roboto-Regular.ttf"`).
+// `FontManager::discover_default()` will then load those files (and any
+// other `.ttf` files it finds in `src/`) via `fontdue` and use them in
+// preference to the bitmap font.
+//
+// If a placeholder string still starts with `"REPLACE_WITH_"`, it is
+// skipped — this lets the crate compile and run even before you fill in
+// the real names.
+
+/// Placeholder for the *primary* TTF font filename.
+///
+/// Replace the string with the actual filename of the primary `.ttf`
+/// file you dropped into the crate's `src/` directory (e.g.
+/// `"Roboto-Regular.ttf"`).  Until you do, the raster backend falls
+/// back to the built-in 5x7 bitmap font.
+pub const PRIMARY_FONT_FILENAME: &str = "REPLACE_WITH_PRIMARY_FONT_FILENAME.ttf";
+
+/// Placeholder for the *secondary* TTF font filename.
+///
+/// Replace the string with the actual filename of the secondary
+/// `.ttf` file you dropped into the crate's `src/` directory.  Useful
+/// for pairing a regular and a bold / monospace face.  Until you do,
+/// the raster backend falls back to the built-in 5x7 bitmap font.
+pub const SECONDARY_FONT_FILENAME: &str = "REPLACE_WITH_SECONDARY_FONT_FILENAME.ttf";
+
+/// Default directory scanned at runtime for `.ttf` files.
+///
+/// Relative to the current working directory at the moment the first
+/// `RasterCore` (i.e. the first raster / gif / video renderer) is
+/// constructed.  Override with the `CAUTIOUS_CARNIVAL_FONT_DIR`
+/// environment variable, or use [`FontManager::discover_in`] to scan
+/// an arbitrary directory.
+pub const DEFAULT_FONT_SCAN_DIR: &str = "src";
+
+/// Name of the environment variable used to override
+/// [`DEFAULT_FONT_SCAN_DIR`] at runtime.
+pub const FONT_DIR_ENV_VAR: &str = "CAUTIOUS_CARNIVAL_FONT_DIR";
 
 // ---------------------------------------------------------------------------
 // Vectors & colour
@@ -2255,6 +2303,10 @@ pub struct Scene {
     renderer: Box<dyn Renderer>,
     config: SceneConfig,
     time: Seconds,
+    /// Voiceover clips recorded against this scene's timeline (see
+    /// [`Scene::add_voiceover`]).  Always present, even without the
+    /// `tts` feature — in that case the track simply stays empty.
+    voiceovers: VoiceoverTrack,
 }
 
 impl Scene {
@@ -2266,6 +2318,7 @@ impl Scene {
             renderer,
             config,
             time: Seconds(0.0),
+            voiceovers: VoiceoverTrack::new(),
         }
     }
 
@@ -2382,6 +2435,74 @@ impl Scene {
         self.play(group);
     }
 
+    /// Borrow the voiceover clips recorded so far against this scene's
+    /// timeline.  See [`Scene::add_voiceover`] for how to add a clip.
+    pub fn voiceovers(&self) -> &[Voiceover] {
+        self.voiceovers.entries()
+    }
+
+    /// Borrow the [`VoiceoverTrack`] for this scene.
+    pub fn voiceover_track(&self) -> &VoiceoverTrack {
+        &self.voiceovers
+    }
+
+    /// Mutably borrow the [`VoiceoverTrack`] for this scene.  Useful
+    /// when you want to push clips recorded outside the standard
+    /// `add_voiceover` flow (e.g. pre-rendered WAV files).
+    pub fn voiceover_track_mut(&mut self) -> &mut VoiceoverTrack {
+        &mut self.voiceovers
+    }
+
+    /// Record a voiceover clip and advance the scene clock by the
+    /// clip's duration, so subsequent animations are timed against the
+    /// narration.
+    ///
+    /// `engine` is any [`VoiceoverEngine`] — see [`EspeakNgEngine`],
+    /// [`Pico2WaveEngine`], and [`CommandEngine`] for ready-made
+    /// implementations.  `out_dir` is the directory in which the WAV
+    /// file will be written (created if it doesn't exist); the file
+    /// is named `voiceover_NNNN.wav` based on the current voiceover
+    /// count.
+    ///
+    /// Returns the recorded [`Voiceover`] (which includes the audio
+    /// path, duration, and sample rate) on success.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # #[cfg(feature = "tts")] {
+    /// use cautious_carnival::{EspeakNgEngine, Scene, SceneConfig, SvgRenderer};
+    /// use std::path::Path;
+    ///
+    /// let renderer = Box::new(SvgRenderer::new("out.svg", 800, 600));
+    /// let mut scene = Scene::new(renderer, SceneConfig::default());
+    /// let engine = EspeakNgEngine::new();
+    /// scene.add_voiceover(&engine, "Hello, world!", Path::new("voiceovers")).unwrap();
+    /// # }
+    /// ```
+    #[cfg(feature = "tts")]
+    pub fn add_voiceover(
+        &mut self,
+        engine: &dyn VoiceoverEngine,
+        text: &str,
+        out_dir: impl AsRef<std::path::Path>,
+    ) -> Result<Voiceover, String> {
+        let out_dir = out_dir.as_ref();
+        std::fs::create_dir_all(out_dir)
+            .map_err(|e| format!("create_dir_all({:?}): {e}", out_dir))?;
+        let path = out_dir.join(format!(
+            "voiceover_{:04}.wav",
+            self.voiceovers.entries().len()
+        ));
+        let vo = engine.synthesize(text, &path)?;
+        let dur = vo.duration;
+        self.voiceovers.push(vo.clone());
+        // Block for the duration of the audio so subsequent animations
+        // are timed against the narration.
+        self.wait(dur.as_f64());
+        Ok(vo)
+    }
+
     /// Render the current state of the scene as a single frame.
     pub fn render_frame(&mut self) {
         self.renderer.begin_frame(self.time, &self.config);
@@ -2407,6 +2528,682 @@ impl Drop for Scene {
     fn drop(&mut self) {
         self.renderer.finish();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Text-to-speech voiceover (`tts` feature)
+// ---------------------------------------------------------------------------
+//
+// `cautious-carnival` ships a small voiceover subsystem modelled on
+// `kokoro-manim-voiceover` for Python Manim.  The core abstraction is the
+// [`VoiceoverEngine`] trait: an engine takes a piece of text and
+// synthesises it into a WAV file.  Three reference implementations are
+// provided out of the box:
+//
+//   * [`EspeakNgEngine`] — wraps the `espeak-ng` binary (Linux/macOS/Windows).
+//   * [`Pico2WaveEngine`]  — wraps the `pico2wave` binary (often packaged
+//                            as `libttspico-utils` on Debian/Ubuntu).
+//   * [`CommandEngine`]   — wraps any user-supplied TTS command, with
+//                            `{text}` and `{out}` placeholders.
+//
+// All engines are *subprocess-based*: they spawn an external binary via
+// `std::process::Command` and read back the WAV file it produces.  This
+// keeps the crate itself free of any C dependencies — you install the
+// TTS binary separately on the system `PATH`.
+//
+// Integration with the scene timeline is handled by [`Scene::add_voiceover`]:
+// it synthesises the audio, pushes the resulting [`Voiceover`] onto the
+// scene's [`VoiceoverTrack`], and then calls `Scene::wait(duration)` so
+// subsequent animations are timed against the narration.  After the scene
+// is rendered, [`mux_audio_video`] (with the `video` feature) can mux the
+// concatenated audio track into the final MP4 via ffmpeg-sidecar.
+
+/// A single synthesised voiceover clip.
+///
+/// Always available (no feature flag) so that scenes can be inspected for
+/// voiceover metadata even when the `tts` feature is off — useful for
+/// tooling that processes already-rendered scenes.
+#[derive(Debug, Clone)]
+pub struct Voiceover {
+    /// Path to the generated WAV file.
+    pub audio_path: std::path::PathBuf,
+    /// The text that was spoken.
+    pub text: String,
+    /// Duration of the audio in seconds.
+    pub duration: Seconds,
+    /// Sample rate of the audio (samples per second, per channel).
+    pub sample_rate: u32,
+    /// Number of audio channels (1 = mono, 2 = stereo).
+    pub channels: u16,
+}
+
+impl Voiceover {
+    /// Construct a voiceover from an already-existing WAV file.
+    ///
+    /// Parses the WAV header to extract duration / sample rate / channel
+    /// count.  Returns an error if the file is not a valid WAV.
+    pub fn from_wav(
+        text: impl Into<String>,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, String> {
+        let path = path.as_ref().to_path_buf();
+        let (duration, sample_rate, channels) = parse_wav(&path)?;
+        Ok(Self {
+            audio_path: path,
+            text: text.into(),
+            duration,
+            sample_rate,
+            channels,
+        })
+    }
+}
+
+/// A timeline of [`Voiceover`] clips recorded against a [`Scene`].
+///
+/// Always available — the `tts` feature only gates the *synthesis* side
+/// (`VoiceoverEngine` and the reference engines).  This lets you inspect
+/// or post-process the track even when the `tts` feature is off.
+#[derive(Debug, Clone, Default)]
+pub struct VoiceoverTrack {
+    entries: Vec<Voiceover>,
+}
+
+impl VoiceoverTrack {
+    /// Construct an empty track.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append a clip to the track.
+    pub fn push(&mut self, vo: Voiceover) {
+        self.entries.push(vo);
+    }
+
+    /// Borrow the clips.
+    pub fn entries(&self) -> &[Voiceover] {
+        &self.entries
+    }
+
+    /// Number of clips.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// `true` if the track has no clips.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Total duration of all clips (sum, not max — clips are sequential
+    /// along the scene timeline).
+    pub fn total_duration(&self) -> Seconds {
+        Seconds(self.entries.iter().map(|v| v.duration.0).sum())
+    }
+
+    /// Iterator over (clip, start_time_on_scene_timeline) pairs.
+    ///
+    /// Useful for muxing: each clip starts playing at the scene time at
+    /// which it was recorded.
+    pub fn iter_with_offsets(&self) -> impl Iterator<Item = (&Voiceover, Seconds)> {
+        let mut t = 0.0_f64;
+        self.entries.iter().map(move |vo| {
+            let start = Seconds(t);
+            t += vo.duration.0;
+            (vo, start)
+        })
+    }
+
+    /// Concatenate all voiceover clips into a single WAV file at
+    /// `out_path`.  Assumes all clips share the same sample format
+    /// (sample rate + bit depth + channels); if they don't, the
+    /// resulting file may be malformed.  For robust muxing with
+    /// re-encoding, use [`mux_audio_video`] (requires the `video`
+    /// feature) or call `ffmpeg` directly.
+    ///
+    /// Returns the duration of the concatenated audio on success.
+    pub fn concatenate_into_wav(
+        &self,
+        out_path: impl AsRef<std::path::Path>,
+    ) -> Result<Seconds, String> {
+        if self.entries.is_empty() {
+            return Err("voiceover track is empty".into());
+        }
+        let out_path = out_path.as_ref();
+        if self.entries.len() == 1 {
+            // Trivial case: just copy the single file.
+            std::fs::copy(&self.entries[0].audio_path, out_path).map_err(|e| {
+                format!(
+                    "copy {:?} -> {:?}: {e}",
+                    self.entries[0].audio_path, out_path
+                )
+            })?;
+            return Ok(self.entries[0].duration);
+        }
+
+        // Multi-clip case: read each WAV's data chunk and concatenate
+        // the raw PCM under a single 44-byte header borrowed from the
+        // first clip.
+        let first = &self.entries[0];
+        let first_bytes = std::fs::read(&first.audio_path)
+            .map_err(|e| format!("read {:?}: {e}", first.audio_path))?;
+        if first_bytes.len() < 44 || &first_bytes[0..4] != b"RIFF" || &first_bytes[8..12] != b"WAVE"
+        {
+            return Err(format!(
+                "first clip {:?} is not a valid WAV",
+                first.audio_path
+            ));
+        }
+
+        // Walk the first WAV's chunks to find the fmt and data chunks.
+        let mut sample_rate = 0u32;
+        let mut channels = 0u16;
+        let mut bits_per_sample = 0u16;
+        let mut fmt_chunk: Vec<u8> = Vec::new();
+        let mut data_start = 0usize;
+        let mut pos = 12usize;
+        while pos + 8 <= first_bytes.len() {
+            let chunk_id = &first_bytes[pos..pos + 4];
+            let chunk_size = u32::from_le_bytes([
+                first_bytes[pos + 4],
+                first_bytes[pos + 5],
+                first_bytes[pos + 6],
+                first_bytes[pos + 7],
+            ]) as usize;
+            if chunk_id == b"fmt " {
+                let body =
+                    &first_bytes[pos + 8..pos + 8 + chunk_size.min(first_bytes.len() - pos - 8)];
+                fmt_chunk = body.to_vec();
+                if body.len() >= 16 {
+                    channels = u16::from_le_bytes([body[2], body[3]]);
+                    sample_rate = u32::from_le_bytes([body[4], body[5], body[6], body[7]]);
+                    bits_per_sample = u16::from_le_bytes([body[14], body[15]]);
+                }
+            } else if chunk_id == b"data" {
+                data_start = pos + 8;
+                break;
+            }
+            pos += 8 + chunk_size;
+            if chunk_size % 2 == 1 {
+                pos += 1;
+            }
+        }
+        if sample_rate == 0 || bits_per_sample == 0 || data_start == 0 {
+            return Err("could not parse fmt / data chunks in first clip".into());
+        }
+
+        // Collect raw PCM from each clip.
+        let mut pcm: Vec<u8> = Vec::new();
+        for vo in &self.entries {
+            let bytes = std::fs::read(&vo.audio_path)
+                .map_err(|e| format!("read {:?}: {e}", vo.audio_path))?;
+            // Find this clip's data chunk.
+            let mut p = 12usize;
+            let mut ds = 0usize;
+            let mut dl = 0usize;
+            while p + 8 <= bytes.len() {
+                let id = &bytes[p..p + 4];
+                let sz =
+                    u32::from_le_bytes([bytes[p + 4], bytes[p + 5], bytes[p + 6], bytes[p + 7]])
+                        as usize;
+                if id == b"data" {
+                    ds = p + 8;
+                    dl = sz;
+                    break;
+                }
+                p += 8 + sz;
+                if sz % 2 == 1 {
+                    p += 1;
+                }
+            }
+            if ds == 0 {
+                return Err(format!("clip {:?} has no data chunk", vo.audio_path));
+            }
+            let end = (ds + dl).min(bytes.len());
+            pcm.extend_from_slice(&bytes[ds..end]);
+        }
+
+        // Write the concatenated WAV.
+        use std::io::Write;
+        let mut f =
+            std::fs::File::create(out_path).map_err(|e| format!("create {:?}: {e}", out_path))?;
+        let total_pcm = pcm.len() as u32;
+        let riff_size = 36 + total_pcm;
+        let fmt_size = fmt_chunk.len() as u32;
+        f.write_all(b"RIFF").map_err(io_err)?;
+        f.write_all(&riff_size.to_le_bytes()).map_err(io_err)?;
+        f.write_all(b"WAVE").map_err(io_err)?;
+        f.write_all(b"fmt ").map_err(io_err)?;
+        f.write_all(&fmt_size.to_le_bytes()).map_err(io_err)?;
+        f.write_all(&fmt_chunk).map_err(io_err)?;
+        f.write_all(b"data").map_err(io_err)?;
+        f.write_all(&total_pcm.to_le_bytes()).map_err(io_err)?;
+        f.write_all(&pcm).map_err(io_err)?;
+        f.flush().map_err(io_err)?;
+
+        let bytes_per_sample = bits_per_sample as f64 / 8.0;
+        let total_samples = total_pcm as f64 / bytes_per_sample / channels as f64;
+        let duration = total_samples / sample_rate as f64;
+        Ok(Seconds(duration))
+    }
+}
+
+/// Helper: convert `std::io::Error` into a `String` for ergonomic
+/// `?`-propagation in the WAV concatenation code.
+fn io_err(e: std::io::Error) -> String {
+    e.to_string()
+}
+
+/// Parse a WAV file's header to extract (duration, sample_rate, channels).
+///
+/// Walks the RIFF chunk structure looking for `fmt ` and `data` chunks,
+/// so it copes with extra metadata chunks (LIST, fact, etc.) inserted
+/// before the data chunk.
+pub fn parse_wav(path: &std::path::Path) -> Result<(Seconds, u32, u16), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {:?}: {e}", path))?;
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err(format!("{:?} is not a valid WAV file", path));
+    }
+    let mut sample_rate = 0u32;
+    let mut channels = 0u16;
+    let mut bits_per_sample = 0u16;
+    let mut data_size = 0u64;
+    let mut pos = 12usize;
+    while pos + 8 <= bytes.len() {
+        let chunk_id = &bytes[pos..pos + 4];
+        let chunk_size = u32::from_le_bytes([
+            bytes[pos + 4],
+            bytes[pos + 5],
+            bytes[pos + 6],
+            bytes[pos + 7],
+        ]) as usize;
+        if chunk_id == b"fmt " {
+            if pos + 8 + chunk_size > bytes.len() {
+                break;
+            }
+            let fmt = &bytes[pos + 8..pos + 8 + chunk_size];
+            if fmt.len() >= 16 {
+                channels = u16::from_le_bytes([fmt[2], fmt[3]]);
+                sample_rate = u32::from_le_bytes([fmt[4], fmt[5], fmt[6], fmt[7]]);
+                bits_per_sample = u16::from_le_bytes([fmt[14], fmt[15]]);
+            }
+        } else if chunk_id == b"data" {
+            data_size = chunk_size as u64;
+            break;
+        }
+        pos += 8 + chunk_size;
+        if chunk_size % 2 == 1 {
+            pos += 1;
+        }
+    }
+    if sample_rate == 0 || bits_per_sample == 0 || data_size == 0 {
+        return Err(format!("could not find fmt / data chunks in {:?}", path));
+    }
+    let bytes_per_sample = bits_per_sample as f64 / 8.0;
+    if channels == 0 || bytes_per_sample == 0.0 {
+        return Err(format!("malformed WAV header in {:?}", path));
+    }
+    let total_samples = data_size as f64 / bytes_per_sample / channels as f64;
+    let duration = total_samples / sample_rate as f64;
+    Ok((Seconds(duration), sample_rate, channels))
+}
+
+// --- VoiceoverEngine trait + reference implementations ---------------------
+
+/// A text-to-speech engine that synthesises text into a WAV file.
+///
+/// Implementations are responsible for:
+///
+/// 1. Spawning whatever system TTS binary they wrap.
+/// 2. Ensuring the output WAV file is written to `out_path`.
+/// 3. Parsing the resulting WAV to fill in `duration` / `sample_rate` /
+///    `channels` on the returned [`Voiceover`].
+///
+/// See [`EspeakNgEngine`], [`Pico2WaveEngine`], and [`CommandEngine`] for
+/// ready-made implementations.
+#[cfg(feature = "tts")]
+pub trait VoiceoverEngine: Send {
+    /// Synthesise `text` into a WAV file at `out_path`.
+    fn synthesize(&self, text: &str, out_path: &std::path::Path) -> Result<Voiceover, String>;
+}
+
+/// An [`VoiceoverEngine`] that wraps the `espeak-ng` binary.
+///
+/// `espeak-ng` is a compact open-source TTS synthesiser available on
+/// Linux, macOS, and Windows.  Install it on your system `PATH`:
+///
+/// * Debian/Ubuntu: `sudo apt install espeak-ng`
+/// * macOS (Homebrew): `brew install espeak-ng`
+/// * Arch: `sudo pacman -S espeak-ng`
+/// * Windows: download from <https://github.com/espeak-ng/espeak-ng/releases>
+///
+/// Voices are listed with `espeak-ng --voices`.  Common ones: `"en"`,
+/// `"en-us"`, `"en-gb"`, `"fr"`, `"de"`, `"es"`, `"hi"`, `"zh"`.
+#[cfg(feature = "tts")]
+#[derive(Debug, Clone)]
+pub struct EspeakNgEngine {
+    voice: String,
+    /// Words per minute (default 175, range 80–450).
+    speed: u32,
+    /// Pitch 0–99 (default 50).
+    pitch: u32,
+    /// Amplitude 0–200 (default 100).
+    amplitude: u32,
+}
+
+#[cfg(feature = "tts")]
+impl EspeakNgEngine {
+    /// Construct an engine with sensible defaults: voice `"en"`, speed
+    /// 175 wpm, pitch 50, amplitude 100.
+    pub fn new() -> Self {
+        Self {
+            voice: "en".to_string(),
+            speed: 175,
+            pitch: 50,
+            amplitude: 100,
+        }
+    }
+
+    /// Set the voice (e.g. `"en-us"`, `"en-gb"`, `"fr"`).
+    pub fn with_voice(mut self, voice: impl Into<String>) -> Self {
+        self.voice = voice.into();
+        self
+    }
+
+    /// Set the speed in words per minute (clamped to 80–450).
+    pub fn with_speed(mut self, speed: u32) -> Self {
+        self.speed = speed.clamp(80, 450);
+        self
+    }
+
+    /// Set the pitch (clamped to 0–99).
+    pub fn with_pitch(mut self, pitch: u32) -> Self {
+        self.pitch = pitch.min(99);
+        self
+    }
+
+    /// Set the amplitude (clamped to 0–200).
+    pub fn with_amplitude(mut self, amplitude: u32) -> Self {
+        self.amplitude = amplitude.min(200);
+        self
+    }
+}
+
+#[cfg(feature = "tts")]
+impl Default for EspeakNgEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "tts")]
+impl VoiceoverEngine for EspeakNgEngine {
+    fn synthesize(&self, text: &str, out_path: &std::path::Path) -> Result<Voiceover, String> {
+        use std::process::Command;
+
+        let out_str = out_path
+            .to_str()
+            .ok_or_else(|| format!("output path is not valid UTF-8: {out_path:?}"))?
+            .to_string();
+
+        let output = Command::new("espeak-ng")
+            .arg("-v")
+            .arg(&self.voice)
+            .arg("-s")
+            .arg(self.speed.to_string())
+            .arg("-p")
+            .arg(self.pitch.to_string())
+            .arg("-a")
+            .arg(self.amplitude.to_string())
+            .arg("-w")
+            .arg(&out_str)
+            .arg(text)
+            .output()
+            .map_err(|e| {
+                format!(
+                    "failed to spawn `espeak-ng`: {e}\n\
+                     hint: install espeak-ng on your system PATH\n\
+                     *  Debian/Ubuntu: sudo apt install espeak-ng\n\
+                     *  macOS:         brew install espeak-ng\n\
+                     *  Arch:          sudo pacman -S espeak-ng"
+                )
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("espeak-ng failed: {stderr}"));
+        }
+
+        let (duration, sample_rate, channels) = parse_wav(out_path)?;
+        Ok(Voiceover {
+            audio_path: out_path.to_path_buf(),
+            text: text.to_string(),
+            duration,
+            sample_rate,
+            channels,
+        })
+    }
+}
+
+/// An [`VoiceoverEngine`] that wraps the `pico2wave` binary.
+///
+/// `pico2wave` is part of the SVOX Pico TTS engine, often packaged as
+/// `libttspico-utils` on Debian/Ubuntu.  It produces higher-quality
+/// speech than `espeak-ng` but supports fewer voices and platforms.
+///
+/// * Debian/Ubuntu: `sudo apt install libttspico-utils`
+#[cfg(feature = "tts")]
+#[derive(Debug, Clone)]
+pub struct Pico2WaveEngine {
+    /// Language code, e.g. `"en-US"`, `"en-GB"`, `"de-DE"`, `"es-ES"`,
+    /// `"fr-FR"`, `"it-IT"`.
+    lang: String,
+}
+
+#[cfg(feature = "tts")]
+impl Pico2WaveEngine {
+    /// Construct an engine with default language `"en-US"`.
+    pub fn new() -> Self {
+        Self {
+            lang: "en-US".to_string(),
+        }
+    }
+
+    /// Set the language code (e.g. `"en-GB"`, `"de-DE"`).
+    pub fn with_lang(mut self, lang: impl Into<String>) -> Self {
+        self.lang = lang.into();
+        self
+    }
+}
+
+#[cfg(feature = "tts")]
+impl Default for Pico2WaveEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "tts")]
+impl VoiceoverEngine for Pico2WaveEngine {
+    fn synthesize(&self, text: &str, out_path: &std::path::Path) -> Result<Voiceover, String> {
+        use std::process::Command;
+
+        let out_str = out_path
+            .to_str()
+            .ok_or_else(|| format!("output path is not valid UTF-8: {out_path:?}"))?
+            .to_string();
+
+        // pico2wave usage: pico2wave -l<lang> -w <out.wav> "<text>"
+        let lang_flag = format!("-l{}", self.lang);
+        let output = Command::new("pico2wave")
+            .arg(&lang_flag)
+            .arg("-w")
+            .arg(&out_str)
+            .arg(text)
+            .output()
+            .map_err(|e| {
+                format!(
+                    "failed to spawn `pico2wave`: {e}\n\
+                     hint: install pico2wave on your system PATH\n\
+                     *  Debian/Ubuntu: sudo apt install libttspico-utils"
+                )
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("pico2wave failed: {stderr}"));
+        }
+
+        let (duration, sample_rate, channels) = parse_wav(out_path)?;
+        Ok(Voiceover {
+            audio_path: out_path.to_path_buf(),
+            text: text.to_string(),
+            duration,
+            sample_rate,
+            channels,
+        })
+    }
+}
+
+/// An [`VoiceoverEngine`] that wraps an arbitrary user-supplied TTS
+/// command.
+///
+/// `command` is the binary to run; each `arg` in `args` is passed
+/// verbatim except that the substring `{text}` is replaced with the
+/// text to synthesise and `{out}` is replaced with the output WAV
+/// path.
+///
+/// This lets you plug in any TTS engine you like — e.g. a local
+/// Kokoro / Piper / Coqui install, a Python wrapper script, or even a
+/// cloud TTS CLI — without having to write a new trait impl.
+///
+/// # Example
+///
+/// ```no_run
+/// # #[cfg(feature = "tts")] {
+/// use cautious_carnival::CommandEngine;
+///
+/// // Wrap a hypothetical `kokoro` binary that takes `-o out.wav` and
+/// // the text as positional args.
+/// let engine = CommandEngine::new("kokoro")
+///     .with_arg("--voice").with_arg("af_heart")
+///     .with_arg("-o").with_arg("{out}")
+///     .with_arg("{text}");
+/// # }
+/// ```
+#[cfg(feature = "tts")]
+#[derive(Debug, Clone)]
+pub struct CommandEngine {
+    command: String,
+    args: Vec<String>,
+}
+
+#[cfg(feature = "tts")]
+impl CommandEngine {
+    /// Construct an engine that runs `command` with no args.  Use
+    /// [`with_arg`](Self::with_arg) to add arguments.
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            args: Vec::new(),
+        }
+    }
+
+    /// Append a single argument.  The substrings `{text}` and `{out}`
+    /// in `arg` are replaced at synthesis time with the text to speak
+    /// and the output WAV path, respectively.
+    pub fn with_arg(mut self, arg: impl Into<String>) -> Self {
+        self.args.push(arg.into());
+        self
+    }
+}
+
+#[cfg(feature = "tts")]
+impl VoiceoverEngine for CommandEngine {
+    fn synthesize(&self, text: &str, out_path: &std::path::Path) -> Result<Voiceover, String> {
+        use std::process::Command;
+
+        let out_str = out_path
+            .to_str()
+            .ok_or_else(|| format!("output path is not valid UTF-8: {out_path:?}"))?
+            .to_string();
+
+        let mut cmd = Command::new(&self.command);
+        for arg in &self.args {
+            let arg = arg.replace("{text}", text).replace("{out}", &out_str);
+            cmd.arg(arg);
+        }
+
+        let output = cmd
+            .output()
+            .map_err(|e| format!("failed to spawn `{}`: {e}", self.command))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("`{}` failed: {stderr}", self.command));
+        }
+
+        let (duration, sample_rate, channels) = parse_wav(out_path)?;
+        Ok(Voiceover {
+            audio_path: out_path.to_path_buf(),
+            text: text.to_string(),
+            duration,
+            sample_rate,
+            channels,
+        })
+    }
+}
+
+/// Mux the concatenated voiceover audio into a video file, producing
+/// a final MP4 / WebM with synchronised narration.
+///
+/// `video_path` is the silent video produced by [`VideoRenderer`];
+/// `audio_path` is the WAV file produced by
+/// [`VoiceoverTrack::concatenate_into_wav`]; `output_path` is where
+/// the final muxed file is written.  The video stream is copied
+/// without re-encoding (`-c:v copy`); the audio is encoded as AAC
+/// (`-c:a aac`) for MP4 or Vorbis (`-c:a libvorbis`) for WebM.  The
+/// `-shortest` flag ensures the output ends when the shorter of the
+/// two streams ends.
+///
+/// Requires the `video` feature (for `ffmpeg-sidecar`).  Requires
+/// `ffmpeg` on the system `PATH` at runtime.
+#[cfg(feature = "video")]
+pub fn mux_audio_video(
+    video_path: &std::path::Path,
+    audio_path: &std::path::Path,
+    output_path: &std::path::Path,
+) -> Result<(), String> {
+    use ffmpeg_sidecar::command::FfmpegCommand;
+
+    let video_str = video_path
+        .to_str()
+        .ok_or_else(|| format!("video path is not valid UTF-8: {video_path:?}"))?;
+    let audio_str = audio_path
+        .to_str()
+        .ok_or_else(|| format!("audio path is not valid UTF-8: {audio_path:?}"))?;
+    let out_str = output_path
+        .to_str()
+        .ok_or_else(|| format!("output path is not valid UTF-8: {output_path:?}"))?;
+
+    let audio_codec = if output_path.extension().and_then(|e| e.to_str()) == Some("webm") {
+        "libvorbis"
+    } else {
+        "aac"
+    };
+
+    let mut cmd = FfmpegCommand::new();
+    cmd.arg("-y");
+    cmd.arg("-i").arg(video_str);
+    cmd.arg("-i").arg(audio_str);
+    cmd.args(["-c:v", "copy", "-c:a", audio_codec, "-shortest", out_str]);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;
+    child
+        .wait()
+        .map_err(|e| format!("ffmpeg wait failed: {e}"))?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -3148,8 +3945,254 @@ mod font_data {
 }
 
 #[cfg(feature = "raster")]
+mod font_manager {
+    //! Runtime TTF font discovery.
+    //!
+    //! See the crate-level docs and the [`crate::PRIMARY_FONT_FILENAME`] /
+    //! [`crate::SECONDARY_FONT_FILENAME`] constants for the placeholder
+    //! contract: replace those strings with the actual filenames of the
+    //! `.ttf` files you dropped into the crate's `src/` directory, and
+    //! [`FontManager::discover_default`] will load them via `fontdue`.
+    //!
+    //! When no TTF fonts are found, the manager is simply empty —
+    //! `RasterCore` then transparently falls back to the embedded 5x7
+    //! bitmap font, so the crate always renders *something*.
+
+    use crate::{
+        DEFAULT_FONT_SCAN_DIR, FONT_DIR_ENV_VAR, PRIMARY_FONT_FILENAME, SECONDARY_FONT_FILENAME,
+    };
+    use std::path::{Path, PathBuf};
+
+    /// A loaded TTF font plus the path it was loaded from (the path is
+    /// kept purely for diagnostics in log messages).
+    struct LoadedFont {
+        font: fontdue::Font,
+        path: PathBuf,
+    }
+
+    /// Manages discovery and loading of `.ttf` fonts from the `src/`
+    /// directory (or a caller-provided override).
+    ///
+    /// Construction is intentionally cheap and best-effort: if no fonts
+    /// are found, you get an empty manager and the renderer falls back
+    /// to the built-in bitmap font.
+    pub struct FontManager {
+        fonts: Vec<LoadedFont>,
+    }
+
+    impl FontManager {
+        /// Scan the default font directory for `.ttf` files.
+        ///
+        /// The directory is resolved as follows:
+        ///
+        /// 1. If the environment variable named by [`FONT_DIR_ENV_VAR`]
+        ///    (`CAUTIOUS_CARNIVAL_FONT_DIR`) is set, use that path.
+        /// 2. Otherwise, use [`DEFAULT_FONT_SCAN_DIR`] (`"src"`)
+        ///    relative to the current working directory.
+        ///
+        /// Within the chosen directory, the two placeholder filenames
+        /// ([`PRIMARY_FONT_FILENAME`] and [`SECONDARY_FONT_FILENAME`])
+        /// are loaded first, in that order.  Any *other* `.ttf` files
+        /// found in the directory are then loaded as additional
+        /// fallbacks (in lexicographic order).  Placeholder strings
+        /// that still start with `"REPLACE_WITH_"` are silently
+        /// skipped — this lets the crate compile and run before you've
+        /// filled in the real names.
+        pub fn discover_default() -> Self {
+            let dir = std::env::var(FONT_DIR_ENV_VAR)
+                .unwrap_or_else(|_| DEFAULT_FONT_SCAN_DIR.to_string());
+            Self::discover_in(&dir)
+        }
+
+        /// Scan `dir` for `.ttf` files and load any found.
+        ///
+        /// See [`FontManager::discover_default`] for the ordering
+        /// rules (placeholder filenames first, then any other `.ttf`
+        /// files in alphabetical order).
+        pub fn discover_in(dir: impl AsRef<Path>) -> Self {
+            let dir = dir.as_ref();
+            let mut fonts: Vec<LoadedFont> = Vec::new();
+            let mut visited: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+
+            // 1) Try the placeholder filenames first, in order.
+            for expected in [PRIMARY_FONT_FILENAME, SECONDARY_FONT_FILENAME] {
+                // Skip placeholders the user hasn't filled in yet.
+                if expected.starts_with("REPLACE_WITH_") {
+                    continue;
+                }
+                let path = dir.join(expected);
+                if !path.is_file() {
+                    continue;
+                }
+                let canonical = match path.canonicalize() {
+                    Ok(c) => c,
+                    Err(_) => path.clone(),
+                };
+                if !visited.insert(canonical.clone()) {
+                    continue;
+                }
+                if let Some(loaded) = load_font(&path) {
+                    fonts.push(loaded);
+                }
+            }
+
+            // 2) Walk the directory for any *other* `.ttf` files as
+            //    fallbacks, in lexicographic order for determinism.
+            let mut extra: Vec<PathBuf> = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("ttf") {
+                        continue;
+                    }
+                    let canonical = match path.canonicalize() {
+                        Ok(c) => c,
+                        Err(_) => path.clone(),
+                    };
+                    if visited.contains(&canonical) {
+                        continue;
+                    }
+                    extra.push(path);
+                }
+            }
+            extra.sort();
+            for path in extra {
+                if let Some(loaded) = load_font(&path) {
+                    fonts.push(loaded);
+                }
+            }
+
+            if !fonts.is_empty() {
+                let names: Vec<String> = fonts
+                    .iter()
+                    .map(|f| format!("{}", f.path.display()))
+                    .collect();
+                eprintln!(
+                    "cautious-carnival: loaded {} TTF font(s) from {:?}: {}",
+                    fonts.len(),
+                    dir,
+                    names.join(", ")
+                );
+            }
+
+            Self { fonts }
+        }
+
+        /// Construct an empty manager — no TTF fonts will be used and
+        /// the raster backend will fall back to the bitmap font.
+        pub fn empty() -> Self {
+            Self { fonts: Vec::new() }
+        }
+
+        /// Number of TTF fonts currently loaded.
+        pub fn len(&self) -> usize {
+            self.fonts.len()
+        }
+
+        /// `true` if no TTF fonts are loaded.
+        pub fn is_empty(&self) -> bool {
+            self.fonts.is_empty()
+        }
+
+        /// Try to rasterise a single glyph using the loaded TTF fonts,
+        /// in load order.  Returns the first font's `(metrics, bitmap)`
+        /// for which [`Font::has_glyph`] returns `true`, or `None` if
+        /// no font has the glyph.
+        ///
+        /// The returned `Vec<u8>` is a single-channel coverage mask
+        /// (alpha values 0..=255) of size `metrics.width * metrics.height`.
+        /// Note: for glyphs with no visible bitmap (e.g. space), the
+        /// bitmap will be empty but `metrics.advance_width` will still
+        /// be positive.
+        pub fn rasterize(&self, ch: char, size: f32) -> Option<(fontdue::Metrics, Vec<u8>)> {
+            for f in &self.fonts {
+                if !f.font.has_glyph(ch) {
+                    continue;
+                }
+                let (metrics, bitmap) = f.font.rasterize(ch, size);
+                return Some((metrics, bitmap));
+            }
+            None
+        }
+
+        /// Try to look up the horizontal advance width (in pixels at
+        /// the requested size) for a glyph.  Returns `0.0` if no font
+        /// has the glyph.
+        pub fn horizontal_advance(&self, ch: char, size: f32) -> f32 {
+            for f in &self.fonts {
+                if f.font.has_glyph(ch) {
+                    return f.font.metrics(ch, size).advance_width;
+                }
+            }
+            0.0
+        }
+
+        /// Try to look up the typographic line metrics (ascent,
+        /// descent, line gap) at the requested size — used to position
+        /// glyphs when compositing.  Returns `None` if no font is
+        /// loaded.
+        pub fn line_metrics(&self, size: f32) -> Option<fontdue::LineMetrics> {
+            for f in &self.fonts {
+                if let Some(m) = f.font.horizontal_line_metrics(size) {
+                    return Some(m);
+                }
+            }
+            None
+        }
+    }
+
+    impl std::fmt::Debug for FontManager {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("FontManager")
+                .field("loaded_count", &self.fonts.len())
+                .finish()
+        }
+    }
+
+    impl Default for FontManager {
+        fn default() -> Self {
+            Self::discover_default()
+        }
+    }
+
+    /// Read `path` and parse it as a TTF font.  On failure, prints a
+    /// diagnostic and returns `None` (rather than propagating the
+    /// error — we want font loading to be best-effort so the renderer
+    /// always starts up).
+    fn load_font(path: &Path) -> Option<LoadedFont> {
+        match std::fs::read(path) {
+            Ok(bytes) => match fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
+                Ok(font) => Some(LoadedFont {
+                    font,
+                    path: path.to_path_buf(),
+                }),
+                Err(e) => {
+                    eprintln!(
+                        "cautious-carnival: failed to parse font {}: {}",
+                        path.display(),
+                        e
+                    );
+                    None
+                }
+            },
+            Err(e) => {
+                eprintln!(
+                    "cautious-carnival: failed to read font {}: {}",
+                    path.display(),
+                    e
+                );
+                None
+            }
+        }
+    }
+}
+
+#[cfg(feature = "raster")]
+pub use font_manager::FontManager;
+
+#[cfg(feature = "raster")]
 mod raster_core {
-    use crate::{scene_to_screen, scene_to_screen_len, Color, SceneConfig, Vec3};
+    use crate::{scene_to_screen, scene_to_screen_len, Color, FontManager, SceneConfig, Vec3};
     use tiny_skia::*;
 
     /// Look up a glyph's 5x7 bitmap from the embedded font table.  Unknown
@@ -3167,21 +4210,46 @@ mod raster_core {
     }
 
     /// State shared by all pixel-based renderers: a `tiny-skia` pixmap plus
-    /// the current scene config (for coordinate conversion).
+    /// the current scene config (for coordinate conversion) and a
+    /// [`FontManager`] that holds any `.ttf` files auto-discovered in
+    /// the crate's `src/` directory.
     pub struct RasterCore {
         /// The underlying pixel buffer.
         pub pixmap: Pixmap,
         /// The scene config for the current frame.
         pub config: SceneConfig,
+        /// TTF fonts auto-discovered in `src/` (or an empty manager if
+        /// none were found, in which case the renderer falls back to
+        /// the embedded 5x7 bitmap font).
+        pub fonts: FontManager,
     }
 
     impl RasterCore {
         /// Construct a new raster core of the given pixel dimensions.
+        ///
+        /// This also triggers a one-shot scan of the default font
+        /// directory (see [`FontManager::discover_default`]) for
+        /// `.ttf` files.  Loaded fonts are kept for the lifetime of
+        /// this `RasterCore` and used in preference to the embedded
+        /// bitmap font.
         pub fn new(width: u32, height: u32) -> Self {
             let pixmap = Pixmap::new(width, height).expect("failed to allocate pixmap");
             Self {
                 pixmap,
                 config: SceneConfig::default(),
+                fonts: FontManager::discover_default(),
+            }
+        }
+
+        /// Construct a new raster core with an explicit font manager
+        /// (useful for tests or when you want to load fonts from a
+        /// non-default directory).
+        pub fn with_fonts(width: u32, height: u32, fonts: FontManager) -> Self {
+            let pixmap = Pixmap::new(width, height).expect("failed to allocate pixmap");
+            Self {
+                pixmap,
+                config: SceneConfig::default(),
+                fonts,
             }
         }
 
@@ -3285,8 +4353,121 @@ mod raster_core {
             );
         }
 
-        /// Draw text using the embedded 5×7 bitmap font.
+        /// Draw text — uses a TTF font when one was auto-discovered in
+        /// `src/`, otherwise falls back to the embedded 5x7 bitmap font.
+        ///
+        /// `size` is interpreted as the font height in pixels (consistent
+        /// with the SVG backend).
         pub fn draw_text(&mut self, text: &str, pos: Vec3, size: f64, color: Color, opacity: f64) {
+            if !self.fonts.is_empty() {
+                self.draw_text_ttf(text, pos, size, color, opacity);
+            } else {
+                self.draw_text_bitmap(text, pos, size, color, opacity);
+            }
+        }
+
+        /// Render text using a loaded TTF font via `fontdue`.  Each glyph
+        /// is rasterised to an alpha-coverage mask and composited into
+        /// the pixmap as a per-pixel `fill_rect` (with the mask's alpha
+        /// baked into the paint).  This is not the fastest possible
+        /// text renderer — it's the simplest one that uses the
+        /// auto-discovered TTF files.
+        fn draw_text_ttf(&mut self, text: &str, pos: Vec3, size: f64, color: Color, opacity: f64) {
+            let pixel_size = size.max(1.0) as f32;
+
+            // First pass: compute the total advance width so we can
+            // centre the text on `pos`.
+            let chars: Vec<char> = text.chars().collect();
+            if chars.is_empty() {
+                return;
+            }
+            let mut total_width = 0.0_f32;
+            for &ch in &chars {
+                total_width += self.fonts.horizontal_advance(ch, pixel_size);
+            }
+            if total_width <= 0.0 {
+                // No font knew any of the glyphs — bail out.
+                return;
+            }
+
+            let (cx, cy) = scene_to_screen(pos, &self.config);
+            // Vertically centre the text on `pos.y` using the font's
+            // ascent / descent.  The bounding-box centre (in font
+            // coords, +Y up) is at `(ascent + descent) / 2` above the
+            // baseline; in screen coords (+Y down) the baseline is
+            // therefore `cy + (ascent + descent) / 2`.
+            let baseline = if let Some(lm) = self.fonts.line_metrics(pixel_size) {
+                cy as f32 + (lm.ascent + lm.descent) / 2.0
+            } else {
+                // Crude fallback if the font exposes no line metrics.
+                cy as f32 + pixel_size * 0.3
+            };
+            let pen_x = cx as f32 - total_width / 2.0;
+
+            // Bake the overall opacity into the colour alpha up-front;
+            // the per-pixel glyph alpha is then multiplied in via a
+            // fresh `Paint` per pixel.
+            let base_alpha = (color.a as f32 * opacity as f32).clamp(0.0, 255.0);
+
+            let mut x = pen_x;
+            for &ch in &chars {
+                let advance = self.fonts.horizontal_advance(ch, pixel_size);
+                if let Some((metrics, bitmap)) = self.fonts.rasterize(ch, pixel_size) {
+                    // Skip drawing if the bitmap is empty (e.g. space,
+                    // tab) — but we still advance the pen below.
+                    if metrics.width > 0 && metrics.height > 0 {
+                        // `metrics.xmin` is the whole-pixel offset of
+                        // the bitmap's left edge from the pen position.
+                        // `metrics.ymin` is the whole-pixel offset of
+                        // the bitmap's *bottom* edge from the baseline
+                        // (fontdue uses typographic +Y-up; positive =
+                        // above baseline).  In screen coords (+Y
+                        // down) the bitmap's *top* edge is therefore
+                        // `baseline - ymin - height`.
+                        let glyph_left = x + metrics.xmin as f32;
+                        let glyph_top = baseline - metrics.ymin as f32 - metrics.height as f32;
+
+                        for row in 0..metrics.height {
+                            for col in 0..metrics.width {
+                                let coverage = bitmap[row * metrics.width + col];
+                                if coverage == 0 {
+                                    continue;
+                                }
+                                let px = glyph_left + col as f32;
+                                let py = glyph_top + row as f32;
+                                // Combine glyph coverage with the base
+                                // colour alpha + overall opacity.
+                                let a = ((coverage as f32 / 255.0) * base_alpha)
+                                    .round()
+                                    .clamp(0.0, 255.0)
+                                    as u8;
+                                if a == 0 {
+                                    continue;
+                                }
+                                if let Some(rect) = Rect::from_xywh(px, py, 1.0, 1.0) {
+                                    let mut p = Paint::default();
+                                    p.set_color_rgba8(color.r, color.g, color.b, a);
+                                    p.anti_alias = false;
+                                    self.pixmap.fill_rect(rect, &p, Transform::identity(), None);
+                                }
+                            }
+                        }
+                    }
+                }
+                x += advance;
+            }
+        }
+
+        /// Render text using the embedded 5x7 ASCII bitmap font.  Used
+        /// as a fallback when no TTF font was found in `src/`.
+        fn draw_text_bitmap(
+            &mut self,
+            text: &str,
+            pos: Vec3,
+            size: f64,
+            color: Color,
+            opacity: f64,
+        ) {
             // `size` is interpreted as the font height in pixels (consistent
             // with the SVG backend).  Each bitmap-pixel is `size / 7.0`.
             let pixel = (size / 7.0).max(0.5);

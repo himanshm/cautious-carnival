@@ -1,6 +1,6 @@
 [package]
 name = "cautious-carnival"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 authors = ["Himansh Mewada <himanshmewada06@atomicmail.io>"]
 license = "GPL-3.0"
@@ -36,6 +36,14 @@ video-download = ["video", "ffmpeg-sidecar/download_ffmpeg"]
 # scenes by rendering frames across all CPU cores. Works with the
 # `raster`, `gif`, and `video` backends.
 parallel = ["dep:rayon"]
+# Text-to-speech voiceover support. Adds the `VoiceoverEngine` trait and
+# three reference implementations (`EspeakNgEngine`, `Pico2WaveEngine`,
+# `CommandEngine`) that shell out to a system TTS binary and produce WAV
+# files synchronised with the scene timeline.  No new Rust dependencies
+# are pulled in — the engines spawn `espeak-ng` / `pico2wave` / any
+# user-supplied command via `std::process::Command`.  Pair with `video`
+# to automatically mux the generated narration into the final MP4.
+tts = []
 
 [dependencies]
 # Core has zero required dependencies by default — keeps the crate embeddable.

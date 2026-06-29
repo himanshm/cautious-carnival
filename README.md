@@ -23,9 +23,127 @@ no proc macros, no required system dependencies — just `cargo build`.
 | `gif`      | `GifRenderer` — animated GIF                      | none (pure Rust)           |
 | `video`    | `VideoRenderer` — MP4 / WebM via FFmpeg           | `libavcodec`, `libavformat`, `libavutil`, `libswscale`, `libswresample` |
 | `parallel` | `parallel_encode_pngs` — batch PNG encoding       | none (uses `rayon`)        |
+| `tts`      | `VoiceoverEngine` + 3 reference engines           | `espeak-ng` or `pico2wave` on `PATH` (or any TTS binary via `CommandEngine`) |
 
 `gif` and `video` both pull in `raster` automatically (they need the
-`tiny-skia` rasteriser to produce pixel frames).
+`tiny-skia` rasteriser to produce pixel frames).  `tts` is independent —
+it works with any backend, but is most useful combined with `video` so
+the narration can be muxed into the final MP4.
+
+## Font discovery (auto-scan of `src/`)
+
+The raster / gif / video backends ship with a built-in 5x7 ASCII bitmap
+font so they work out-of-the-box with zero configuration.  When you
+need nicer text rendering, drop one or two `.ttf` files into the
+crate's `src/` directory and they will be auto-discovered at runtime
+by `FontManager::discover_default`.
+
+Two placeholder constants control which filenames are looked up first:
+
+```rust
+// In src/lib.rs — replace these strings with your actual filenames.
+pub const PRIMARY_FONT_FILENAME: &str = "REPLACE_WITH_PRIMARY_FONT_FILENAME.ttf";
+pub const SECONDARY_FONT_FILENAME: &str = "REPLACE_WITH_SECONDARY_FONT_FILENAME.ttf";
+```
+
+Replace the placeholder strings with the actual filenames of the `.ttf`
+files you placed in `src/` (e.g. `"Roboto-Regular.ttf"` and
+`"Roboto-Bold.ttf"`).  Until you do, the raster backend falls back to
+the built-in bitmap font — placeholder strings starting with
+`"REPLACE_WITH_"` are silently skipped so the crate always compiles
+and runs.
+
+Any *other* `.ttf` files found in `src/` are also loaded as additional
+fallbacks, in lexicographic order.  Override the scan directory at
+runtime with the `CAUTIOUS_CARNIVAL_FONT_DIR` environment variable, or
+use `FontManager::discover_in(path)` to scan an arbitrary directory.
+
+## Text-to-speech voiceover (`tts` feature)
+
+Inspired by [`kokoro-manim-voiceover`](https://pypi.org/project/kokoro-manim-voiceover/)
+for Python Manim, `cautious-carnival` ships a small voiceover
+subsystem that synthesises narration from text and synchronises it
+with the scene timeline.
+
+The core abstraction is the `VoiceoverEngine` trait — an engine takes
+a piece of text and produces a WAV file.  Three reference
+implementations are provided:
+
+| Engine            | Wraps                | Install                                                |
+|-------------------|----------------------|--------------------------------------------------------|
+| `EspeakNgEngine`  | `espeak-ng` binary   | `sudo apt install espeak-ng` / `brew install espeak-ng` |
+| `Pico2WaveEngine` | `pico2wave` binary   | `sudo apt install libttspico-utils`                    |
+| `CommandEngine`   | any TTS command      | n/a — plug in Kokoro / Piper / Coqui / cloud CLIs       |
+
+All engines are subprocess-based — they spawn an external TTS binary
+via `std::process::Command` and read back the WAV file it produces.
+This keeps the crate itself free of any C dependencies.
+
+### Adding narration to a scene
+
+```rust
+use cautious_carnival::*;
+use std::path::Path;
+
+let renderer = Box::new(VideoRenderer::new("out.mp4", 1280, 720, 60).unwrap());
+let mut scene = Scene::new(renderer, SceneConfig::default());
+
+let engine = EspeakNgEngine::new().with_voice("en-us");
+
+// Synthesise "Hello, world!" into voiceovers/voiceover_0000.wav,
+// push it onto the scene's voiceover track, and advance the scene
+// clock by the audio's duration so the next animation is timed
+// against the narration.
+scene.add_voiceover(&engine, "Hello, world!", Path::new("voiceovers")).unwrap();
+
+// This animation now starts after the narration finishes.
+let circle = Circle::new(1.0).with_color(Color::BLUE);
+scene.play(FadeIn::new(Box::new(circle), 1.0));
+```
+
+### Muxing narration into the final video
+
+After the scene is rendered, concatenate the voiceover track into a
+single WAV and mux it into the silent video:
+
+```rust
+use cautious_carnival::mux_audio_video;
+use std::path::Path;
+
+// `scene` must be dropped before muxing so VideoRenderer finalises
+// the silent MP4.  Capture the track first:
+let track = scene.voiceover_track().clone();
+drop(scene);
+
+if !track.is_empty() {
+    track.concatenate_into_wav("narration.wav").unwrap();
+    mux_audio_video(
+        Path::new("out.mp4"),       // silent video
+        Path::new("narration.wav"), // concatenated voiceover
+        Path::new("out_narrated.mp4"),
+    ).unwrap();
+}
+```
+
+`mux_audio_video` requires the `video` feature (for `ffmpeg-sidecar`)
+and `ffmpeg` on the system `PATH` at runtime.  The video stream is
+copied without re-encoding (`-c:v copy`); the audio is encoded as AAC
+for MP4 or Vorbis for WebM.
+
+### Plugging in Kokoro / Piper / any other TTS
+
+Use `CommandEngine` to wrap any TTS binary — the substrings `{text}`
+and `{out}` in each argument are replaced at synthesis time:
+
+```rust
+use cautious_carnival::CommandEngine;
+
+// Wrap a hypothetical `kokoro` CLI:
+let engine = CommandEngine::new("kokoro")
+    .with_arg("--voice").with_arg("af_heart")
+    .with_arg("-o").with_arg("{out}")
+    .with_arg("{text}");
+```
 
 ## Quick start
 
@@ -40,6 +158,9 @@ cargo run --example hello_circle --features gif
 
 # MP4 video (requires FFmpeg shared libs)
 cargo run --example hello_circle --features video
+
+# MP4 video + text-to-speech narration (requires espeak-ng on PATH)
+cargo run --example hello_circle --features "video tts"
 
 # PNG frame sequence (rasterise now, encode later)
 cargo run --example hello_circle --features raster
@@ -235,12 +356,18 @@ an explicit id, animations target the most-recently-added mobject.
 The SVG backend renders text natively via `<text>` elements with a
 sans-serif font.
 
-The raster / gif / video backends use a built-in 5×7 ASCII bitmap font
-(covering printable ASCII 0x20–0x7E) so they don't pull in a font
-library at runtime.  The font is generated from a system monospace font
-at build time via `scripts/gen_font.py`.  Text in raster mode looks
-pixelated but readable; for crisp text use the SVG backend or supply
-your own text-rendering `Renderer` impl.
+The raster / gif / video backends look for `.ttf` files in the crate's
+`src/` directory at runtime (see [Font discovery](#font-discovery-auto-scan-of-src)
+above).  If TTF fonts are found, they are used via `fontdue` for
+high-quality anti-aliased text rendering.  If no TTF fonts are found,
+the backends fall back to a built-in 5x7 ASCII bitmap font (covering
+printable ASCII 0x20–0x7E) so text always renders *something*.
+
+The bitmap font is generated from a system monospace font at build
+time via `scripts/gen_font.py`.  To use real TTF fonts, drop one or
+two `.ttf` files into `src/` and update the
+`PRIMARY_FONT_FILENAME` / `SECONDARY_FONT_FILENAME` constants in
+`lib.rs` to match.
 
 ## Examples
 
@@ -299,6 +426,7 @@ scene.play(Rotate::new(star.clone_box(), std::f64::consts::TAU, 3.0)
 cargo test                       # core tests (SVG only)
 cargo test --features gif        # + GIF round-trip test
 cargo test --features raster     # + PNG sequence test
+cargo test --features video      # + MP4 test (skips if ffmpeg not on PATH)
 cargo test --all-features        # everything
 ```
 
